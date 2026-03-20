@@ -553,7 +553,7 @@ def main() -> None:
     parser.add_argument("--hand-width", type=int, default=120, help="手形显示宽度（px）")
     parser.add_argument("--hand-height", type=int, default=105, help="手形显示高度（px）")
     parser.add_argument("--hand-opacity", type=float, default=1.0, help="手形透明度（0-1）")
-    parser.add_argument("--hand-hotspot-x", type=float, default=0.07, help="手形热点在宽度的比例(0-1)，用于贴合笔尖")
+    parser.add_argument("--hand-hotspot-x", type=float, default=0.02, help="手形热点在宽度的比例(0-1)，用于贴合笔尖")
     parser.add_argument("--hand-hotspot-y", type=float, default=0.2, help="手形热点在高度的比例(0-1)，用于贴合笔尖")
     parser.add_argument("--hand-rotate", action="store_true", help="是否让手形沿切线旋转")
     # 默认就反转/放大，符合“直接跑就是手形正确方向和大小”的需求
