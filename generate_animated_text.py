@@ -127,8 +127,15 @@ def inject_hand_image(
         f'width="{hand_width}" height="{hand_height}" '
         f'style="visibility:{init_visibility}; opacity:{opacity}; pointer-events:none;" />\n'
     )
-    # 只替换第一个 </style>
-    return re.sub(r"(</style>\s*)", r"\1" + insert, svg_text, count=1)
+    # 为了让手形永远在“最上层”，把它插到变换后的主绘制 <g> 的最后面（最后一个 </g> 之前）
+    # 否则手形可能被后续 path 绘制覆盖，看起来“手不见”。
+    svg_end = svg_text.rfind("</svg>")
+    if svg_end == -1:
+        return svg_text
+    g_end_pos = svg_text.rfind("</g>", 0, svg_end)
+    if g_end_pos == -1:
+        return svg_text
+    return svg_text[:g_end_pos] + insert + svg_text[g_end_pos:]
 
 
 def extract_stroke_timeline(svg_text: str, prefix: str) -> list[dict]:
@@ -214,6 +221,20 @@ def build_hand_js(
   const rotateExtraDeg = {rotate_extra_deg};
 
   function updateHandForTrack(track, t) {{
+    const img = document.getElementById(track.handId);
+    if (!img) return;
+
+    // 写完一个字就隐藏：避免上一字最后笔画结束后手还一直停在那儿
+    const strokes = track.strokes || [];
+    if (strokes.length > 0) {{
+      const last = strokes[strokes.length - 1];
+      const end = (last.delay || 0) + (last.duration || 0);
+      if (t > end) {{
+        img.style.visibility = 'hidden';
+        return;
+      }}
+    }}
+
     let active = null;
     for (const s of track.strokes) {{
       if (!s.pathLen) continue;
@@ -225,8 +246,6 @@ def build_hand_js(
     }}
     if (!active) return;
 
-    const img = document.getElementById(track.handId);
-    if (!img) return;
     img.style.visibility = 'visible';
 
     const dur = active.duration || 0.000001;
@@ -295,6 +314,151 @@ def build_hand_js(
       }}
       updateHandForTrack(track, t);
     }}
+    requestAnimationFrame(tick);
+  }}
+  requestAnimationFrame(tick);
+</script>
+"""
+
+
+def build_hand_overlay_js(
+    stroke_items: list[dict],
+    hand_image_href: str,
+    hand_width: int,
+    hand_height: int,
+    hand_opacity: float,
+    hotspot_x_ratio: float,
+    hotspot_y_ratio: float,
+    rotate_hand: bool,
+    flip_x: bool,
+    flip_y: bool,
+    rotate_extra_deg: float,
+    debug_show: bool,
+) -> str:
+    import json
+
+    # 确保按时间升序，JS 用于查找 active
+    stroke_items = sorted(stroke_items, key=lambda x: x["delay"])
+
+    flipX = -1 if flip_x else 1
+    flipY = -1 if flip_y else 1
+    hotspotXpx = hand_width * hotspot_x_ratio
+    hotspotYpx = hand_height * hotspot_y_ratio
+
+    items_json = json.dumps(stroke_items, ensure_ascii=False)
+    # 固定用 viewBox 0..1024 的坐标 -> 转屏坐标用 getScreenCTM，避免手工映射缩放
+    return f"""
+<img
+  id="handOverlay"
+  src="{html.escape(hand_image_href)}"
+  width="{hand_width}"
+  height="{hand_height}"
+  style="
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: {hand_width}px;
+    height: {hand_height}px;
+    opacity: {hand_opacity};
+    visibility: {'visible' if debug_show else 'hidden'};
+    pointer-events: none;
+    z-index: 9999;
+    transform: translate({-hotspotXpx}px, {-hotspotYpx}px) rotate(0deg) scale({flipX}, {flipY});
+  "
+/>
+<script>
+  const handStrokes = {items_json};
+  const rotateHand = {str(bool(rotate_hand)).lower()};
+  const flipX = {flipX};
+  const flipY = {flipY};
+  const rotateExtraDeg = {rotate_extra_deg};
+  const hotspotXpx = {hotspotXpx};
+  const hotspotYpx = {hotspotYpx};
+
+  function hide() {{
+    const img = document.getElementById('handOverlay');
+    if (img) img.style.visibility = 'hidden';
+  }}
+
+  function setVisible() {{
+    const img = document.getElementById('handOverlay');
+    if (img) img.style.visibility = 'visible';
+  }}
+
+  function svgPointToScreen(path, pt) {{
+    // pt 是 path 的 user space 坐标，转到屏幕像素坐标
+    const svg = path.ownerSVGElement;
+    const ptSvg = svg.createSVGPoint();
+    ptSvg.x = pt.x;
+    ptSvg.y = pt.y;
+    const ctm = path.getScreenCTM();
+    if (!ctm) return null;
+    const screen = ptSvg.matrixTransform(ctm);
+    return {{x: screen.x, y: screen.y}};
+  }}
+
+  function updateForTime(t) {{
+    const img = document.getElementById('handOverlay');
+    if (!img) return;
+    if (!handStrokes.length) return;
+
+    let active = null;
+    for (const s of handStrokes) {{
+      if (t >= s.delay) {{
+        active = s;
+      }} else {{
+        break;
+      }}
+    }}
+
+    if (!active) {{
+      img.style.visibility = 'hidden';
+      return;
+    }}
+    img.style.visibility = 'visible';
+
+    const path = document.getElementById(active.id);
+    if (!path) return;
+    const dur = active.duration || 0.000001;
+    const stepAt = (active.stepAt === undefined ? 1.0 : active.stepAt);
+
+    // step-end 对齐：0..stepAt 线性，超过 stepAt 保持在末端
+    const tLocal = t - active.delay;
+    let p = 0;
+    if (tLocal <= 0) {{
+      p = 0;
+    }} else if (stepAt >= 1.0) {{
+      p = tLocal / dur;
+    }} else {{
+      const linearDur = dur * stepAt;
+      p = tLocal >= linearDur ? 1 : (tLocal / linearDur);
+    }}
+    p = Math.min(1, Math.max(0, p));
+
+    const pathLen = path.getTotalLength();
+    const L = pathLen * p;
+    const pt = path.getPointAtLength(L);
+    const p2 = Math.min(1, p + 0.01);
+    const pt2 = path.getPointAtLength(pathLen * p2);
+
+    const angle = Math.atan2(pt2.y - pt.y, pt2.x - pt.x) * 180 / Math.PI;
+    const finalRot = rotateHand ? (angle + rotateExtraDeg) : rotateExtraDeg;
+
+    const screenPt = svgPointToScreen(path, pt);
+    if (!screenPt) return;
+
+    img.style.left = screenPt.x + 'px';
+    img.style.top = screenPt.y + 'px';
+    img.style.transform =
+      'translate(' + (-hotspotXpx) + 'px, ' + (-hotspotYpx) + 'px)'
+      + ' rotate(' + finalRot + 'deg)'
+      + ' scale(' + flipX + ',' + flipY + ')';
+  }}
+
+  const start = performance.now();
+  function tick(now) {{
+    const t = (now - start) / 1000.0;
+    updateForTime(t);
     requestAnimationFrame(tick);
   }}
   requestAnimationFrame(tick);
@@ -378,7 +542,7 @@ def main() -> None:
     )
     parser.add_argument("--gap-delay", type=float, default=0.8, help="fixed-delay 模式下：字与字之间的起始延迟（秒）")
     parser.add_argument("--char-gap", type=float, default=0.15, help="sequential 模式下：字与字之间额外间隔（秒）")
-    parser.add_argument("--speed", type=float, default=1.0, help="速度倍数：1=正常，2=更快，0.5=更慢")
+    parser.add_argument("--speed", type=float, default=4.0, help="速度倍数：1=正常，2=更快，0.5=更慢")
     # 默认直接跟随手形：不需要用户再传参数
     # 假设输出 HTML 和图片都在当前脚本运行目录（仓库根目录）
     parser.add_argument(
@@ -389,15 +553,21 @@ def main() -> None:
     parser.add_argument("--hand-width", type=int, default=120, help="手形显示宽度（px）")
     parser.add_argument("--hand-height", type=int, default=105, help="手形显示高度（px）")
     parser.add_argument("--hand-opacity", type=float, default=1.0, help="手形透明度（0-1）")
-    parser.add_argument("--hand-hotspot-x", type=float, default=0.10, help="手形热点在宽度的比例(0-1)，用于贴合笔尖")
-    parser.add_argument("--hand-hotspot-y", type=float, default=0.55, help="手形热点在高度的比例(0-1)，用于贴合笔尖")
+    parser.add_argument("--hand-hotspot-x", type=float, default=0.07, help="手形热点在宽度的比例(0-1)，用于贴合笔尖")
+    parser.add_argument("--hand-hotspot-y", type=float, default=0.2, help="手形热点在高度的比例(0-1)，用于贴合笔尖")
     parser.add_argument("--hand-rotate", action="store_true", help="是否让手形沿切线旋转")
     # 默认就反转/放大，符合“直接跑就是手形正确方向和大小”的需求
     parser.add_argument("--hand-flip-x", action="store_true", default=True, help="水平翻转手形（解决反着）")
-    parser.add_argument("--hand-flip-y", action="store_true", default=False, help="垂直翻转手形（默认不翻）")
+    parser.add_argument("--hand-flip-y", action="store_true", default=True, help="垂直翻转手形（默认不翻）")
     parser.add_argument("--hand-rotate-extra", type=float, default=180.0, help="额外旋转角度（度），用于微调手的方向")
-    parser.add_argument("--hand-scale", type=float, default=5.0 ,help="手形整体缩放倍数（比直接改宽高更方便）")
+    parser.add_argument("--hand-scale", type=float, default=1.8, help="手形整体缩放倍数（比直接改宽高更方便）")
     parser.add_argument("--hand-debug-show", action="store_true", help="调试：不等 JS 就先把手形显示出来（用于排查“不见了”）")
+    parser.add_argument(
+        "--hand-mode",
+        choices=["overlay", "per-char"],
+        default="overlay",
+        help="overlay：手形作为页面顶层覆盖层（不会被其它字遮挡）；per-char：注入到每个字 SVG 内",
+    )
     args = parser.parse_args()
 
     phrase = args.phrase
@@ -415,6 +585,7 @@ def main() -> None:
 
     pieces_html: list[str] = []
     hand_tracks: list[dict] = []
+    stroke_items: list[dict] = []
     current_offset = args.start_delay
     for i, ch in enumerate(phrase):
         if ch.isspace():
@@ -447,23 +618,38 @@ def main() -> None:
         if args.hand_image:
             timeline = extract_stroke_timeline(svg_text, prefix=prefix)
             if timeline:
-                hand_w = int(args.hand_width * args.hand_scale)
-                hand_h = int(args.hand_height * args.hand_scale)
-                svg_text = inject_hand_image(
-                    svg_text=svg_text,
-                    prefix=prefix,
-                    hand_image_href=args.hand_image,
-                    hand_width=hand_w,
-                    hand_height=hand_h,
-                    opacity=args.hand_opacity,
-                    debug_show=args.hand_debug_show,
-                )
-                hand_tracks.append(
-                    {
-                        "handId": f"{prefix}hand",
-                        "width": hand_w,
-                        "height": hand_h,
-                        "strokes": [
+                if args.hand_mode == "per-char":
+                    hand_w = int(args.hand_width * args.hand_scale)
+                    hand_h = int(args.hand_height * args.hand_scale)
+                    svg_text = inject_hand_image(
+                        svg_text=svg_text,
+                        prefix=prefix,
+                        hand_image_href=args.hand_image,
+                        hand_width=hand_w,
+                        hand_height=hand_h,
+                        opacity=args.hand_opacity,
+                        debug_show=args.hand_debug_show,
+                    )
+                    hand_tracks.append(
+                        {
+                            "handId": f"{prefix}hand",
+                            "width": hand_w,
+                            "height": hand_h,
+                            "strokes": [
+                                {
+                                    "id": s["id"],
+                                    "delay": s["delay"],
+                                    "duration": s["duration"],
+                                    "stepAt": s.get("stepAt", 1.0),
+                                }
+                                for s in timeline
+                            ],
+                        }
+                    )
+                else:
+                    # overlay：不要注入到每个字 SVG，而是收集所有笔画时间线，交给全局顶层手形覆盖层
+                    stroke_items.extend(
+                        [
                             {
                                 "id": s["id"],
                                 "delay": s["delay"],
@@ -471,23 +657,40 @@ def main() -> None:
                                 "stepAt": s.get("stepAt", 1.0),
                             }
                             for s in timeline
-                        ],
-                    }
-                )
+                        ]
+                    )
 
         pieces_html.append(svg_to_html(svg_text, char_size=args.char_size))
 
     hand_js = ""
-    if args.hand_image and hand_tracks:
-        hand_js = build_hand_js(
-            tracks=hand_tracks,
-            rotate_hand=args.hand_rotate,
-            hotspot_x_ratio=args.hand_hotspot_x,
-            hotspot_y_ratio=args.hand_hotspot_y,
-            flip_x=args.hand_flip_x,
-            flip_y=args.hand_flip_y,
-            rotate_extra_deg=args.hand_rotate_extra,
-        )
+    if args.hand_image:
+        if args.hand_mode == "per-char" and hand_tracks:
+            hand_js = build_hand_js(
+                tracks=hand_tracks,
+                rotate_hand=args.hand_rotate,
+                hotspot_x_ratio=args.hand_hotspot_x,
+                hotspot_y_ratio=args.hand_hotspot_y,
+                flip_x=args.hand_flip_x,
+                flip_y=args.hand_flip_y,
+                rotate_extra_deg=args.hand_rotate_extra,
+            )
+        elif args.hand_mode == "overlay" and stroke_items:
+            hand_w = int(args.hand_width * args.hand_scale)
+            hand_h = int(args.hand_height * args.hand_scale)
+            hand_js = build_hand_overlay_js(
+                stroke_items=stroke_items,
+                hand_image_href=args.hand_image,
+                hand_width=hand_w,
+                hand_height=hand_h,
+                hand_opacity=args.hand_opacity,
+                hotspot_x_ratio=args.hand_hotspot_x,
+                hotspot_y_ratio=args.hand_hotspot_y,
+                rotate_hand=args.hand_rotate,
+                flip_x=args.hand_flip_x,
+                flip_y=args.hand_flip_y,
+                rotate_extra_deg=args.hand_rotate_extra,
+                debug_show=args.hand_debug_show,
+            )
 
     html_out = build_html(
         phrase=phrase,
