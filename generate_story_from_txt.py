@@ -163,7 +163,9 @@ def main() -> None:
         page_files.append(name)
 
     total_content = sum(durations)
-    total_with_fade = total_content + len(durations) * _FADE_OUT_SECONDS
+    # 页间淡出 n-1 次，最后一页播完直接结束，不再淡出
+    fade_count = max(0, len(durations) - 1)
+    total_with_fade = total_content + fade_count * _FADE_OUT_SECONDS
     meta = {
         "pages": page_files,
         "durations": durations,
@@ -182,7 +184,10 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print(f"完成：共 {len(pages)} 页，总时长 ≈{total_content:.1f}s（含淡出 ≈{total_with_fade:.1f}s）")
+    print(
+        f"完成：共 {len(pages)} 页，总时长 ≈{total_content:.1f}s"
+        f"（含页间淡出 ≈{total_with_fade:.1f}s，最后一页无淡出）"
+    )
     print(f"打开连续播放：{index_html}")
 
     if args.export_mp4:
@@ -323,6 +328,11 @@ def _build_index_html(
         const ms = Math.max(100, Math.round(durs[i] * 1000));
         timer = setTimeout(function () {{
           timer = null;
+          const isLastPage = i + 1 >= pages.length;
+          if (isLastPage) {{
+            show(i + 1);
+            return;
+          }}
           whiteFade.style.transition = 'opacity ' + FADE_CSS + ' ease-out';
           void whiteFade.offsetWidth;
           whiteFade.style.opacity = '1';

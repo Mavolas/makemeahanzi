@@ -168,7 +168,8 @@ async function main() {
     const sumDurs = (meta.durations || []).reduce((a, b) => a + Number(b), 0);
     const n = (meta.pages || []).length;
     const fadeSec = fadeMs / 1000;
-    const contentSec = sumDurs + n * fadeSec;
+    // 与 index.html 一致：最后一页后不淡出，仅 n-1 次页间淡出
+    const contentSec = sumDurs + Math.max(0, n - 1) * fadeSec;
     const safePad = Number.isFinite(padSec) && padSec >= 0 ? padSec : 1;
 
     console.log(`[export] mode=story  pages=${n}  content≈${contentSec.toFixed(1)}s`);
