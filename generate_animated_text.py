@@ -572,7 +572,8 @@ def main() -> None:
 
     phrase = args.phrase
     if phrase is None:
-        phrase = input("请输入要生成的文字（例如：我是最棒的）：").strip()
+        # 不手动输入时：默认输出两行文本
+        phrase = "测试测试测试\n看起来不错"
     svg_dir = args.svg_dir
     out_path = args.out
 
@@ -588,6 +589,10 @@ def main() -> None:
     stroke_items: list[dict] = []
     current_offset = args.start_delay
     for i, ch in enumerate(phrase):
+        if ch == "\n":
+            # flex 换行：占满一整行
+            pieces_html.append('<div style="flex-basis:100%; height:0;"></div>')
+            continue
         if ch.isspace():
             # 空格：直接用一个占位块控制换行/间距
             pieces_html.append(f'<div style="width:{args.char_size // 3}px"></div>')
