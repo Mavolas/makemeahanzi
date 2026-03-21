@@ -473,9 +473,14 @@ def build_html(
     gap_px: int,
     out_title: str,
     hand_js: str = "",
+    canvas_width: int = 1054,
+    canvas_height: int = 588,
+    canvas_bg: str = "#d6e9f8",
+    line_gap_px: int = 24,
 ) -> str:
-    # 为了简单可靠：用 flex 排版 + gap 控制字间距
+    # 固定画布 + 淡蓝背景；两行字在画布内水平、垂直居中
     safe_title = html.escape(out_title)
+    safe_bg = html.escape(canvas_bg)
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -485,15 +490,33 @@ def build_html(
   <style>
     body {{
       margin: 0;
-      padding: 24px;
-      background: white;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #e8e8e8;
       font-family: system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }}
+    .canvas {{
+      width: {canvas_width}px;
+      height: {canvas_height}px;
+      background: {safe_bg};
+      box-sizing: border-box;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
     }}
     .phrase {{
       display: flex;
-      align-items: center;
-      gap: {gap_px}px;
       flex-wrap: wrap;
+      align-items: center;
+      align-content: center;
+      justify-content: center;
+      column-gap: {gap_px}px;
+      row-gap: {line_gap_px}px;
+      max-width: 100%;
     }}
     .char svg {{
       width: {char_size}px;
@@ -516,8 +539,10 @@ def build_html(
   </style>
 </head>
 <body>
-  <div class="phrase">
-    {''.join(pieces_html)}
+  <div class="canvas">
+    <div class="phrase">
+      {''.join(pieces_html)}
+    </div>
   </div>
   {hand_js}
 </body>
@@ -531,8 +556,12 @@ def main() -> None:
     parser.add_argument("phrase", nargs="?", default=None, help="要生成的文字，例如：我是最棒的")
     parser.add_argument("--out", default="phrase.html", help="输出 HTML 文件路径")
     parser.add_argument("--svg-dir", default="svgs", help="动画 SVG 目录（默认：svgs）")
-    parser.add_argument("--char-size", type=int, default=160, help="每个字显示尺寸（px）")
-    parser.add_argument("--gap-px", type=int, default=20, help="字与字之间间距（px）")
+    parser.add_argument("--char-size", type=int, default=150, help="每个字显示尺寸（px）")
+    parser.add_argument("--gap-px", type=int, default=10, help="字与字之间间距（px）")
+    parser.add_argument("--line-gap-px", type=int, default=48, help="两行之间的垂直间距（px）")
+    parser.add_argument("--canvas-width", type=int, default=1054, help="固定背景画布宽度（px）")
+    parser.add_argument("--canvas-height", type=int, default=588, help="固定背景画布高度（px）")
+    parser.add_argument("--canvas-bg", default="#d6e9f8", help="画布背景色（默认淡蓝色）")
     parser.add_argument("--start-delay", type=float, default=0.0, help="第一个字的起始延迟（秒）")
     parser.add_argument(
         "--sequence-mode",
@@ -560,7 +589,7 @@ def main() -> None:
     parser.add_argument("--hand-flip-x", action="store_true", default=True, help="水平翻转手形（解决反着）")
     parser.add_argument("--hand-flip-y", action="store_true", default=True, help="垂直翻转手形（默认不翻）")
     parser.add_argument("--hand-rotate-extra", type=float, default=180.0, help="额外旋转角度（度），用于微调手的方向")
-    parser.add_argument("--hand-scale", type=float, default=1.8, help="手形整体缩放倍数（比直接改宽高更方便）")
+    parser.add_argument("--hand-scale", type=float, default=3.5, help="手形整体缩放倍数（比直接改宽高更方便）")
     parser.add_argument("--hand-debug-show", action="store_true", help="调试：不等 JS 就先把手形显示出来（用于排查“不见了”）")
     parser.add_argument(
         "--hand-mode",
@@ -704,6 +733,10 @@ def main() -> None:
         gap_px=args.gap_px,
         out_title=f"Animated Text: {phrase}",
         hand_js=hand_js,
+        canvas_width=args.canvas_width,
+        canvas_height=args.canvas_height,
+        canvas_bg=args.canvas_bg,
+        line_gap_px=args.line_gap_px,
     )
 
     with open(out_path, "w", encoding="utf-8") as f:
