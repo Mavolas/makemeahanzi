@@ -26,6 +26,9 @@ from pathlib import Path
 # 不传文案路径时的默认文件（与脚本同目录，即仓库根）
 _DEFAULT_TXT_NAME = "文案7 好运靠近 短.txt"
 
+# 页与页之间：当前页播完后淡出时长（秒），再加载下一页
+_FADE_OUT_SECONDS = 1.0
+
 # 与 export_mp4_from_html.js 类似：从生成的 HTML 里估算整页 CSS 动画结束时间（秒）
 _ANIM_BLOCK_RE = re.compile(
     r"animation:\s*[^\s]+\s+([0-9]+(?:\.[0-9]+)?)s\s+both;[\s\S]{0,800}?animation-delay:\s*([0-9]+(?:\.[0-9]+)?)s;",
@@ -145,7 +148,7 @@ def main() -> None:
     # index.html：与 page_*.html 同目录，用相对路径
     index_html = out_dir / "index.html"
     index_html.write_text(
-        _build_index_html(page_files, durations),
+        _build_index_html(page_files, durations, fade_out_seconds=_FADE_OUT_SECONDS),
         encoding="utf-8",
     )
 
@@ -153,9 +156,16 @@ def main() -> None:
     print(f"打开连续播放：{index_html}")
 
 
-def _build_index_html(pages: list[str], durations: list[float]) -> str:
+def _build_index_html(
+    pages: list[str],
+    durations: list[float],
+    *,
+    fade_out_seconds: float = _FADE_OUT_SECONDS,
+) -> str:
     pages_json = json.dumps(pages, ensure_ascii=False)
     durs_json = json.dumps(durations)
+    fade_ms = max(1, int(round(fade_out_seconds * 1000)))
+    fade_css_js = json.dumps(f"{fade_out_seconds:g}s")
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -167,13 +177,27 @@ def _build_index_html(pages: list[str], durations: list[float]) -> str:
       margin: 0;
       height: 100%;
       overflow: hidden;
-      background: #1a1a1a;
+      background: #fff;
+    }}
+    #stage {{
+      position: relative;
+      width: 100%;
+      height: 100%;
+      background: #fff;
     }}
     #view {{
       width: 100%;
       height: 100%;
       border: 0;
       display: block;
+    }}
+    /* 盖在 iframe 上：由透明渐变为不透明白，视觉上为浅蓝画布与字「溶入」白底，而非露出外框深色 */
+    #whiteFade {{
+      position: absolute;
+      inset: 0;
+      background: #fff;
+      opacity: 0;
+      pointer-events: none;
     }}
     #bar {{
       position: fixed;
@@ -189,34 +213,61 @@ def _build_index_html(pages: list[str], durations: list[float]) -> str:
   </style>
 </head>
 <body>
-  <iframe id="view" title="当前页"></iframe>
+  <div id="stage">
+    <iframe id="view" title="当前页"></iframe>
+    <div id="whiteFade" aria-hidden="true"></div>
+  </div>
   <div id="bar"></div>
   <script>
     const pages = {pages_json};
     const durs = {durs_json};
+    const FADE_MS = {fade_ms};
+    const FADE_CSS = {fade_css_js};
     const bar = document.getElementById('bar');
     const view = document.getElementById('view');
-    let idx = 0;
+    const whiteFade = document.getElementById('whiteFade');
     let timer = null;
+    let fadeTimer = null;
+
+    function clearTimers() {{
+      if (timer) {{
+        clearTimeout(timer);
+        timer = null;
+      }}
+      if (fadeTimer) {{
+        clearTimeout(fadeTimer);
+        fadeTimer = null;
+      }}
+    }}
 
     function setBar(text) {{
       bar.textContent = text;
     }}
 
     function show(i) {{
-      if (timer) {{
-        clearTimeout(timer);
-        timer = null;
-      }}
+      clearTimers();
       if (i >= pages.length) {{
         setBar('全部播完（共 ' + pages.length + ' 页）');
+        whiteFade.style.transition = 'none';
+        whiteFade.style.opacity = '0';
         view.removeAttribute('src');
         return;
       }}
       setBar('第 ' + (i + 1) + ' / ' + pages.length + ' 页（约 ' + durs[i].toFixed(2) + 's）');
       view.onload = function () {{
+        whiteFade.style.transition = 'none';
+        whiteFade.style.opacity = '0';
         const ms = Math.max(100, Math.round(durs[i] * 1000));
-        timer = setTimeout(function () {{ show(i + 1); }}, ms);
+        timer = setTimeout(function () {{
+          timer = null;
+          whiteFade.style.transition = 'opacity ' + FADE_CSS + ' ease-out';
+          void whiteFade.offsetWidth;
+          whiteFade.style.opacity = '1';
+          fadeTimer = setTimeout(function () {{
+            fadeTimer = null;
+            show(i + 1);
+          }}, FADE_MS);
+        }}, ms);
       }};
       view.src = pages[i];
     }}

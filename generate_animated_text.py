@@ -608,7 +608,7 @@ def main() -> None:
     )
     parser.add_argument("--gap-delay", type=float, default=0.8, help="fixed-delay 模式下：字与字之间的起始延迟（秒）")
     parser.add_argument("--char-gap", type=float, default=0.15, help="sequential 模式下：字与字之间额外间隔（秒）")
-    parser.add_argument("--speed", type=float, default=4.0, help="速度倍数：1=正常，2=更快，0.5=更慢")
+    parser.add_argument("--speed", type=float, default=6.0, help="速度倍数：1=正常，2=更快，0.5=更慢")
     # 默认直接跟随手形：不需要用户再传参数
     # 假设输出 HTML 和图片都在当前脚本运行目录（仓库根目录）
     parser.add_argument(
