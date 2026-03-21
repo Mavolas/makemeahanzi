@@ -1,0 +1,24 @@
+{
+  "name": "makemeahanzi",
+  "version": "1.0.0",
+  "description": "![Make Me a Hanzi annotation tool](example.gif)",
+  "main": "export_mp4_from_html.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mavolas/makemeahanzi.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Mavolas/makemeahanzi/issues"
+  },
+  "homepage": "https://github.com/Mavolas/makemeahanzi#readme",
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}
