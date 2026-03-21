@@ -33,6 +33,29 @@ CHAR_ANIM_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+# 去掉 Make Me a Hanzi 单字 SVG 里的：米字格虚线 + 浅色整字轮廓（动画开始前不要显示）
+# 米字格：属性顺序不固定，用两个 lookahead
+_SVG_GRID_GROUP_RE = re.compile(
+    r'<g(?=[^>]*stroke="lightgray")(?=[^>]*stroke-dasharray="1,\s*1")[^>]*>[\s\S]*?</g>\s*',
+    re.IGNORECASE,
+)
+_SVG_LIGHTGRAY_PATH_RE = re.compile(
+    r'\s*<path[^>]*fill="lightgray"[^>]*>\s*</path>\s*',
+    re.IGNORECASE,
+)
+
+
+def strip_svgs_preview_guides(svg_text: str) -> str:
+    """移除米字格/对角线虚线组，以及 fill=lightgray 的预览字形。"""
+    svg_text = _SVG_GRID_GROUP_RE.sub("", svg_text, count=1)
+    svg_text = _SVG_LIGHTGRAY_PATH_RE.sub("", svg_text)
+    return svg_text
+
+
+def normalize_stroke_color_black(svg_text: str) -> str:
+    """原 SVG 动画 keyframes 里用蓝色描边书写过程，统一改为黑色。"""
+    return re.sub(r"stroke:\s*blue\s*;", "stroke: black;", svg_text, flags=re.IGNORECASE)
+
 
 def load_char_svg(svg_dir: str, ch: str) -> Optional[str]:
     codepoint = ord(ch)
@@ -631,6 +654,9 @@ def main() -> None:
         if svg_text is None:
             pieces_html.append(f'<div class="missing">{html.escape(ch)}</div>')
             continue
+
+        svg_text = strip_svgs_preview_guides(svg_text)
+        svg_text = normalize_stroke_color_black(svg_text)
 
         prefix = f"c{i}_"
         svg_text = namespace_svg(svg_text, prefix=prefix)
