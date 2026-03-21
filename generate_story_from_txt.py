@@ -162,7 +162,14 @@ def main() -> None:
         durations.append(dur)
         page_files.append(name)
 
-    meta = {"pages": page_files, "durations": durations}
+    total_content = sum(durations)
+    total_with_fade = total_content + len(durations) * _FADE_OUT_SECONDS
+    meta = {
+        "pages": page_files,
+        "durations": durations,
+        "total_content_sec": round(total_content, 3),
+        "total_with_fade_sec": round(total_with_fade, 3),
+    }
     (out_dir / "story_meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -175,7 +182,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print(f"完成：共 {len(pages)} 页")
+    print(f"完成：共 {len(pages)} 页，总时长 ≈{total_content:.1f}s（含淡出 ≈{total_with_fade:.1f}s）")
     print(f"打开连续播放：{index_html}")
 
     if args.export_mp4:
