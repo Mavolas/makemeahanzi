@@ -4,24 +4,24 @@
 从纯文本文案生成「多页」手写动画，每页两行（跳过空行），每页调用 generate_animated_text.py，
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
 
+不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
+再只问一次「每个文稿统一生成多少套」；每套输出到独立子目录（如 story_output/文件名_01/）。
+
 用法示例：
   python3 generate_story_from_txt.py
-    （默认文案 + 生成 HTML 后自动调用 export_mp4_from_html.js 导出 MP4）
+  python3 generate_story_from_txt.py --wenan-all 20
   python3 generate_story_from_txt.py --no-export-mp4
-    （只生成 page_*.html / index.html / story_meta.json，不导出视频）
-  python3 generate_story_from_txt.py --out-dir story_好运靠近
   python3 generate_story_from_txt.py 其它文案.txt --out-dir out -- --speed 2 --char-size 140
-  python3 generate_story_from_txt.py --mp4-out 成片.mp4
+  python3 generate_story_from_txt.py --wenan-dir 我的文案夹
 
 「--」 后面的参数会原样传给 generate_animated_text.py。
-story_meta.json 的每页时长与 generate_animated_text 内笔画块解析一致；若需「慢速对照」可传「-- --speed 1」。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,11 +30,9 @@ from pathlib import Path
 
 from generate_animated_text import estimate_phrase_html_duration_seconds
 
-# 不传文案路径时的默认文件（与脚本同目录，即仓库根）
-_DEFAULT_TXT_NAME = "文案7 好运靠近 短.txt"
-
-# 页与页之间：当前页播完后淡出时长（秒），再加载下一页
+_WENAN_DIR_NAME = "wenan"
 _FADE_OUT_SECONDS = 1.0
+
 
 def load_non_empty_lines(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
@@ -59,93 +57,92 @@ def estimate_page_duration_seconds(html: str) -> float:
     return estimate_phrase_html_duration_seconds(html, fallback_seconds=3.0)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="文案按两页一行分页，连续生成手写动画并汇总 index.html")
-    parser.add_argument(
-        "txt_path",
-        nargs="?",
-        default=None,
-        help=f"文案 txt 路径（省略则使用本仓库「{_DEFAULT_TXT_NAME}」）",
-    )
-    parser.add_argument(
-        "--out-dir",
-        default="story_output",
-        help="输出目录（将写入 page_001.html … 与 index.html）",
-    )
-    parser.add_argument(
-        "--page-padding",
-        type=float,
-        default=0.35,
-        help="每页播完后到下一页之间的间隔（秒）",
-    )
-    parser.add_argument(
-        "--no-export-mp4",
-        action="store_true",
-        help="不自动导出 MP4（默认会在生成 HTML 后调用 export_mp4_from_html.js）",
-    )
-    parser.add_argument(
-        "--export-mp4",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--mp4-out",
-        default=None,
-        help="MP4 输出路径（默认：<--out-dir>/story.mp4）",
-    )
-    parser.add_argument(
-        "--mp4-fps",
-        default=None,
-        help="已废弃：当前导出为浏览器 recordVideo（约 25fps），不再传此参数",
-    )
-    parser.add_argument(
-        "--mp4-width",
-        default=None,
-        help="传给 export 的 --width（省略则用脚本默认）",
-    )
-    parser.add_argument(
-        "--mp4-height",
-        default=None,
-        help="传给 export 的 --height（省略则用脚本默认）",
-    )
-    parser.add_argument(
-        "--mp4-show-bar",
-        action="store_true",
-        help="导出时保留 index 底部进度栏（默认导出会 --hide-bar）",
-    )
-    parser.add_argument(
-        "gen_args",
-        nargs=argparse.REMAINDER,
-        help="传给 generate_animated_text.py 的额外参数（前面请加 --）",
-    )
-    args = parser.parse_args()
+def _safe_output_stem(txt_path: Path) -> str:
+    stem = txt_path.stem
+    for c in '<>:"/\\|?*':
+        stem = stem.replace(c, "_")
+    stem = stem.strip() or "story"
+    stem = re.sub(r"\s+", "_", stem)
+    return stem
 
-    repo_root = Path(__file__).resolve().parent
-    if args.txt_path:
-        txt_path = Path(args.txt_path).expanduser().resolve()
-    else:
-        txt_path = (repo_root / _DEFAULT_TXT_NAME).resolve()
-    if not txt_path.is_file():
-        raise SystemExit(f"找不到文案文件：{txt_path}")
 
-    out_dir = Path(args.out_dir).resolve()
+def _preview_txt(path: Path) -> tuple[str, list[str], list[str]]:
+    """返回 (展示用多行文本, 非空行, 分页列表)。"""
+    lines = load_non_empty_lines(path)
+    pages = lines_to_pages_two_per_page(lines)
+    head_lines = lines[:5]
+    head = "\n".join(head_lines) if head_lines else "(无内容)"
+    if len(lines) > 5:
+        head += f"\n…（共 {len(lines)} 行非空）"
+    preview = (
+        f"文件：{path.name}\n"
+        f"非空行：{len(lines)} → 约 {len(pages)} 页\n"
+        f"---\n{head}"
+    )
+    return preview, lines, pages
+
+
+def _prompt_unified_repeat_count(
+    *,
+    interactive: bool,
+    default_repeat: int,
+    forced: int | None,
+    file_count: int,
+) -> int:
+    if forced is not None:
+        return max(0, forced)
+    if not interactive:
+        print(
+            f"（非交互终端）每个文稿默认生成 {default_repeat} 套；"
+            f"可用 --wenan-all N 指定，共 {file_count} 个 txt"
+        )
+        return max(0, default_repeat)
+    while True:
+        s = input(
+            f"共 {file_count} 个文稿，每个统一生成多少套？（0=全部跳过，回车=1）: "
+        ).strip()
+        if s == "":
+            return 1
+        try:
+            n = int(s)
+            if n < 0:
+                print("请输入 ≥0 的整数")
+                continue
+            return n
+        except ValueError:
+            print("请输入整数")
+
+
+def _list_wenan_txt(wenan_dir: Path) -> list[Path]:
+    if not wenan_dir.is_dir():
+        return []
+    return sorted(wenan_dir.glob("*.txt"), key=lambda p: p.name.lower())
+
+
+def generate_one_story(
+    *,
+    txt_path: Path,
+    out_dir: Path,
+    page_padding: float,
+    gen_extra: list[str],
+    repo_root: Path,
+    export_mp4: bool,
+    mp4_out: Path | None,
+    mp4_width: str | None,
+    mp4_height: str | None,
+    mp4_show_bar: bool,
+) -> None:
+    lines = load_non_empty_lines(txt_path)
+    if not lines:
+        raise SystemExit(f"文案里没有非空行：{txt_path}")
+
+    pages = lines_to_pages_two_per_page(lines)
+    print(f"  [{txt_path.name}] 共 {len(lines)} 行 → {len(pages)} 页 → 输出 {out_dir}")
+
     out_dir.mkdir(parents=True, exist_ok=True)
-
     gen_script = repo_root / "generate_animated_text.py"
     if not gen_script.is_file():
         raise SystemExit(f"找不到 {gen_script}")
-
-    lines = load_non_empty_lines(txt_path)
-    if not lines:
-        raise SystemExit("文案里没有非空行")
-
-    pages = lines_to_pages_two_per_page(lines)
-    print(f"共 {len(lines)} 行非空文案 -> {len(pages)} 页")
-
-    # 传给子进程的额外参数（argparse REMAINDER 可能包含开头的 '--'，去掉）
-    extra = list(args.gen_args or [])
-    if extra and extra[0] == "--":
-        extra = extra[1:]
 
     page_files: list[str] = []
     durations: list[float] = []
@@ -159,21 +156,21 @@ def main() -> None:
             phrase,
             "--out",
             str(out_html),
-            *extra,
+            *gen_extra,
         ]
-        print(f"[{idx}/{len(pages)}] 生成 {name} …")
+        print(f"    [{idx}/{len(pages)}] {name}")
         subprocess.run(cmd, cwd=str(repo_root), check=True)
 
         html = out_html.read_text(encoding="utf-8")
-        dur = estimate_page_duration_seconds(html) + args.page_padding
+        dur = estimate_page_duration_seconds(html) + page_padding
         durations.append(dur)
         page_files.append(name)
 
     total_content = sum(durations)
-    # 页间淡出 n-1 次，最后一页播完直接结束，不再淡出
     fade_count = max(0, len(durations) - 1)
     total_with_fade = total_content + fade_count * _FADE_OUT_SECONDS
     meta = {
+        "source_txt": txt_path.name,
         "pages": page_files,
         "durations": durations,
         "total_content_sec": round(total_content, 3),
@@ -184,7 +181,6 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    # index.html：与 page_*.html 同目录，用相对路径
     index_html = out_dir / "index.html"
     index_html.write_text(
         _build_index_html(page_files, durations, fade_out_seconds=_FADE_OUT_SECONDS),
@@ -192,21 +188,19 @@ def main() -> None:
     )
 
     print(
-        f"完成：共 {len(pages)} 页，总时长 ≈{total_content:.1f}s"
-        f"（含页间淡出 ≈{total_with_fade:.1f}s，最后一页无淡出）"
+        f"  完成：{len(pages)} 页，≈{total_content:.1f}s（含页间淡出 ≈{total_with_fade:.1f}s）"
     )
-    print(f"打开连续播放：{index_html}")
 
-    if not args.no_export_mp4:
+    if export_mp4:
         export_js = repo_root / "export_mp4_from_html.js"
         if not export_js.is_file():
             raise SystemExit(f"自动导出需要存在 {export_js}")
         node = shutil.which("node")
         if not node:
-            raise SystemExit("未在 PATH 中找到 node，无法导出 MP4（可加 --no-export-mp4 跳过）")
+            raise SystemExit("未在 PATH 中找到 node（可加 --no-export-mp4 跳过）")
         mp4_path = (
-            Path(args.mp4_out).expanduser().resolve()
-            if args.mp4_out
+            Path(mp4_out).expanduser().resolve()
+            if mp4_out
             else (out_dir / "story.mp4")
         )
         mp4_path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,25 +212,185 @@ def main() -> None:
             "--out",
             str(mp4_path),
         ]
-        if args.mp4_width:
-            cmd.extend(["--width", str(args.mp4_width)])
-        if args.mp4_height:
-            cmd.extend(["--height", str(args.mp4_height)])
-        if not args.mp4_show_bar:
+        if mp4_width:
+            cmd.extend(["--width", str(mp4_width)])
+        if mp4_height:
+            cmd.extend(["--height", str(mp4_height)])
+        if not mp4_show_bar:
             cmd.append("--hide-bar")
-        print("正在导出 MP4 …")
-        print(" ", " ".join(cmd))
+        print("    导出 MP4 …")
         t0 = time.perf_counter()
-        try:
-            subprocess.run(cmd, cwd=str(repo_root), check=True)
-        except subprocess.CalledProcessError as e:
-            raise SystemExit(f"导出 MP4 失败（退出码 {e.returncode}），可先 --no-export-mp4 只生成 HTML") from e
+        subprocess.run(cmd, cwd=str(repo_root), check=True)
         elapsed = time.perf_counter() - t0
         size_mb = mp4_path.stat().st_size / (1024 * 1024)
-        print(
-            f"MP4 导出成功：{mp4_path}\n"
-            f"  耗时 {elapsed:.1f}s  约 {size_mb:.2f} MiB"
+        print(f"    MP4：{mp4_path}  ({elapsed:.1f}s, {size_mb:.2f} MiB)")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="文案按两页一行分页，连续生成手写动画并汇总 index.html")
+    parser.add_argument(
+        "txt_path",
+        nargs="?",
+        default=None,
+        help="单个文案 txt（省略则扫描 --wenan-dir 下全部 .txt）",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default="story_output",
+        help="输出根目录；单文件时为最终目录；wenan 批量时在旗下建 文件名_01 等子目录",
+    )
+    parser.add_argument(
+        "--wenan-dir",
+        default=_WENAN_DIR_NAME,
+        help=f"批量文案目录，相对仓库根（默认 {_WENAN_DIR_NAME}）",
+    )
+    parser.add_argument(
+        "--wenan-all",
+        type=int,
+        default=None,
+        metavar="N",
+        help="不提问：每个 txt 统一生成 N 套（N≥0）",
+    )
+    parser.add_argument(
+        "--wenan-default-repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="非交互终端时每个 txt 默认套数（默认 1）",
+    )
+    parser.add_argument(
+        "--page-padding",
+        type=float,
+        default=0.35,
+        help="每页时长估算附加秒数",
+    )
+    parser.add_argument(
+        "--no-export-mp4",
+        action="store_true",
+        help="不自动导出 MP4",
+    )
+    parser.add_argument(
+        "--export-mp4",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--mp4-out",
+        default=None,
+        help="单文件模式：MP4 路径；wenan 批量时忽略",
+    )
+    parser.add_argument(
+        "--mp4-fps",
+        default=None,
+        help="已废弃",
+    )
+    parser.add_argument("--mp4-width", default=None, help="传给 export 的 --width")
+    parser.add_argument("--mp4-height", default=None, help="传给 export 的 --height")
+    parser.add_argument(
+        "--mp4-show-bar",
+        action="store_true",
+        help="导出时保留进度栏",
+    )
+    parser.add_argument(
+        "gen_args",
+        nargs=argparse.REMAINDER,
+        help="传给 generate_animated_text.py（前请加 --）",
+    )
+    args = parser.parse_args()
+
+    repo_root = Path(__file__).resolve().parent
+    gen_extra = list(args.gen_args or [])
+    if gen_extra and gen_extra[0] == "--":
+        gen_extra = gen_extra[1:]
+
+    export_mp4 = not args.no_export_mp4
+    base_out = Path(args.out_dir).expanduser().resolve()
+
+    if args.txt_path:
+        txt_path = Path(args.txt_path).expanduser().resolve()
+        if not txt_path.is_file():
+            raise SystemExit(f"找不到文案文件：{txt_path}")
+        mp4_single = Path(args.mp4_out).expanduser() if args.mp4_out else None
+        generate_one_story(
+            txt_path=txt_path,
+            out_dir=base_out,
+            page_padding=args.page_padding,
+            gen_extra=gen_extra,
+            repo_root=repo_root,
+            export_mp4=export_mp4,
+            mp4_out=mp4_single,
+            mp4_width=args.mp4_width,
+            mp4_height=args.mp4_height,
+            mp4_show_bar=args.mp4_show_bar,
         )
+        print(f"打开连续播放：{base_out / 'index.html'}")
+        return
+
+    wenan_dir = (repo_root / args.wenan_dir).resolve()
+    txt_files = _list_wenan_txt(wenan_dir)
+    if not txt_files:
+        raise SystemExit(
+            f"未找到可用文案：目录「{wenan_dir}」不存在或其中没有 .txt。\n"
+            f"请创建并放入文案，或：python {Path(__file__).name} 你的文案.txt"
+        )
+
+    if args.mp4_out:
+        print("提示：wenan 批量忽略 --mp4-out，每套为子目录内 story.mp4", file=sys.stderr)
+
+    interactive = sys.stdin.isatty()
+    print(f"wenan 批量：{len(txt_files)} 个 txt，输出根目录 {base_out}")
+    print(f"文案目录：{wenan_dir}\n")
+
+    print("— 文稿列表（每个将使用下面输入的同一套数）—")
+    nonempty: list[Path] = []
+    for txt_path in txt_files:
+        preview, lines, _pages = _preview_txt(txt_path)
+        print("\n" + preview)
+        if lines:
+            nonempty.append(txt_path)
+        else:
+            print("  → 将跳过（无有效行）")
+
+    if not nonempty:
+        raise SystemExit("没有可生成的文稿（全部为空）。")
+
+    n = _prompt_unified_repeat_count(
+        interactive=interactive,
+        default_repeat=max(0, args.wenan_default_repeat),
+        forced=args.wenan_all,
+        file_count=len(nonempty),
+    )
+    if n == 0:
+        print("套数为 0，不生成。")
+        return
+
+    print(f"\n每个文稿 {n} 套，{len(nonempty)} 个文稿 → 最多 {len(nonempty) * n} 套。\n")
+
+    total_jobs = 0
+    for txt_path in nonempty:
+        stem = _safe_output_stem(txt_path)
+        for k in range(1, n + 1):
+            sub = f"{stem}_{k:02d}" if n > 1 else stem
+            out_dir = base_out / sub
+            total_jobs += 1
+            print(f"\n>>> [{total_jobs}] {txt_path.name} 第 {k}/{n} 套 → {out_dir}")
+            try:
+                generate_one_story(
+                    txt_path=txt_path,
+                    out_dir=out_dir,
+                    page_padding=args.page_padding,
+                    gen_extra=gen_extra,
+                    repo_root=repo_root,
+                    export_mp4=export_mp4,
+                    mp4_out=None,
+                    mp4_width=args.mp4_width,
+                    mp4_height=args.mp4_height,
+                    mp4_show_bar=args.mp4_show_bar,
+                )
+            except subprocess.CalledProcessError as e:
+                raise SystemExit(f"子进程失败（退出码 {e.returncode}）") from e
+
+    print(f"\n全部完成：共 {total_jobs} 套，根目录 {base_out}")
 
 
 def _build_index_html(
@@ -274,7 +428,6 @@ def _build_index_html(
       border: 0;
       display: block;
     }}
-    /* 盖在 iframe 上：由透明渐变为不透明白，视觉上为浅蓝画布与字「溶入」白底，而非露出外框深色 */
     #whiteFade {{
       position: absolute;
       inset: 0;
