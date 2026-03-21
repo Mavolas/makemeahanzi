@@ -139,6 +139,19 @@ def get_char_total_duration_seconds(svg_text: str) -> float:
     return max(ends) if ends else 0.0
 
 
+def estimate_phrase_html_duration_seconds(html: str, *, fallback_seconds: float = 3.0) -> float:
+    """
+    整页 HTML（含多个字、带 c0_ 等前缀的 #...make-me-a-hanzi-animation-N）上，
+    取所有笔画动画块 (animation-delay + duration) 的最大值，与 get_char_total_duration_seconds 同源。
+    """
+    best = 0.0
+    for m in CHAR_ANIM_BLOCK_RE.finditer(html):
+        duration_s = float(m.group(2))
+        delay_s = float(m.group(3))
+        best = max(best, delay_s + duration_s)
+    return best if best > 0 else fallback_seconds
+
+
 def svg_to_html(svg_text: str, char_size: int) -> str:
     # 仅靠 CSS 缩放即可，所以不额外改 svg 标签属性
     # 注意：svg_text 本身已经有 <svg ...>...</svg>
@@ -608,7 +621,12 @@ def main() -> None:
     )
     parser.add_argument("--gap-delay", type=float, default=0.8, help="fixed-delay 模式下：字与字之间的起始延迟（秒）")
     parser.add_argument("--char-gap", type=float, default=0.15, help="sequential 模式下：字与字之间额外间隔（秒）")
-    parser.add_argument("--speed", type=float, default=6.0, help="速度倍数：1=正常，2=更快，0.5=更慢")
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=8.0,
+        help="速度倍数（默认 6）：数值越大越快；delay/duration 均除以该值。1≈未加速；与 story_meta 时长估算一致。",
+    )
     # 默认直接跟随手形：不需要用户再传参数
     # 假设输出 HTML 和图片都在当前脚本运行目录（仓库根目录）
     parser.add_argument(

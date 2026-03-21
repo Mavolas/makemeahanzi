@@ -9,8 +9,11 @@
     （默认使用本仓库下的「文案7 好运靠近 短.txt」）
   python3 generate_story_from_txt.py --out-dir story_好运靠近
   python3 generate_story_from_txt.py 其它文案.txt --out-dir out -- --speed 2 --char-size 140
+  python3 generate_story_from_txt.py --export-mp4
+  python3 generate_story_from_txt.py --out-dir story_output --export-mp4 --mp4-out 成片.mp4
 
 「--」 后面的参数会原样传给 generate_animated_text.py。
+story_meta.json 的每页时长与 generate_animated_text 内笔画块解析一致；若需「慢速对照」可传「-- --speed 1」。
 """
 
 from __future__ import annotations
@@ -18,23 +21,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from generate_animated_text import estimate_phrase_html_duration_seconds
 
 # 不传文案路径时的默认文件（与脚本同目录，即仓库根）
 _DEFAULT_TXT_NAME = "文案7 好运靠近 短.txt"
 
 # 页与页之间：当前页播完后淡出时长（秒），再加载下一页
 _FADE_OUT_SECONDS = 1.0
-
-# 与 export_mp4_from_html.js 类似：从生成的 HTML 里估算整页 CSS 动画结束时间（秒）
-_ANIM_BLOCK_RE = re.compile(
-    r"animation:\s*[^\s]+\s+([0-9]+(?:\.[0-9]+)?)s\s+both;[\s\S]{0,800}?animation-delay:\s*([0-9]+(?:\.[0-9]+)?)s;",
-    re.IGNORECASE,
-)
-
 
 def load_non_empty_lines(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
@@ -56,12 +54,7 @@ def lines_to_pages_two_per_page(lines: list[str]) -> list[str]:
 
 
 def estimate_page_duration_seconds(html: str) -> float:
-    best = 0.0
-    for m in _ANIM_BLOCK_RE.finditer(html):
-        dur = float(m.group(1))
-        delay = float(m.group(2))
-        best = max(best, delay + dur)
-    return best if best > 0 else 3.0
+    return estimate_phrase_html_duration_seconds(html, fallback_seconds=3.0)
 
 
 def main() -> None:
@@ -82,6 +75,36 @@ def main() -> None:
         type=float,
         default=0.35,
         help="每页播完后到下一页之间的间隔（秒）",
+    )
+    parser.add_argument(
+        "--export-mp4",
+        action="store_true",
+        help="生成完成后调用仓库根目录 export_mp4_from_html.js 导出故事 MP4（需 Node、playwright、ffmpeg）",
+    )
+    parser.add_argument(
+        "--mp4-out",
+        default=None,
+        help="MP4 输出路径（默认：<--out-dir>/story.mp4）",
+    )
+    parser.add_argument(
+        "--mp4-fps",
+        default="48",
+        help="传给 export_mp4_from_html.js 的 --fps（默认 48，≥40）",
+    )
+    parser.add_argument(
+        "--mp4-width",
+        default=None,
+        help="传给 export 的 --width（省略则用脚本默认）",
+    )
+    parser.add_argument(
+        "--mp4-height",
+        default=None,
+        help="传给 export 的 --height（省略则用脚本默认）",
+    )
+    parser.add_argument(
+        "--mp4-show-bar",
+        action="store_true",
+        help="导出时保留 index 底部进度栏（默认导出会 --hide-bar）",
     )
     parser.add_argument(
         "gen_args",
@@ -154,6 +177,39 @@ def main() -> None:
 
     print(f"完成：共 {len(pages)} 页")
     print(f"打开连续播放：{index_html}")
+
+    if args.export_mp4:
+        export_js = repo_root / "export_mp4_from_html.js"
+        if not export_js.is_file():
+            raise SystemExit(f"--export-mp4 需要存在 {export_js}")
+        node = shutil.which("node")
+        if not node:
+            raise SystemExit("未在 PATH 中找到 node，无法 --export-mp4")
+        mp4_path = (
+            Path(args.mp4_out).expanduser().resolve()
+            if args.mp4_out
+            else (out_dir / "story.mp4")
+        )
+        mp4_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            node,
+            str(export_js),
+            "--story",
+            str(out_dir),
+            "--out",
+            str(mp4_path),
+            "--fps",
+            str(args.mp4_fps),
+        ]
+        if args.mp4_width:
+            cmd.extend(["--width", str(args.mp4_width)])
+        if args.mp4_height:
+            cmd.extend(["--height", str(args.mp4_height)])
+        if not args.mp4_show_bar:
+            cmd.append("--hide-bar")
+        print("导出 MP4 …", " ".join(cmd))
+        subprocess.run(cmd, cwd=str(repo_root), check=True)
+        print(f"MP4：{mp4_path}")
 
 
 def _build_index_html(
