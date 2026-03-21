@@ -6,11 +6,12 @@
 
 用法示例：
   python3 generate_story_from_txt.py
-    （默认使用本仓库下的「文案7 好运靠近 短.txt」）
+    （默认文案 + 生成 HTML 后自动调用 export_mp4_from_html.js 导出 MP4）
+  python3 generate_story_from_txt.py --no-export-mp4
+    （只生成 page_*.html / index.html / story_meta.json，不导出视频）
   python3 generate_story_from_txt.py --out-dir story_好运靠近
   python3 generate_story_from_txt.py 其它文案.txt --out-dir out -- --speed 2 --char-size 140
-  python3 generate_story_from_txt.py --export-mp4
-  python3 generate_story_from_txt.py --out-dir story_output --export-mp4 --mp4-out 成片.mp4
+  python3 generate_story_from_txt.py --mp4-out 成片.mp4
 
 「--」 后面的参数会原样传给 generate_animated_text.py。
 story_meta.json 的每页时长与 generate_animated_text 内笔画块解析一致；若需「慢速对照」可传「-- --speed 1」。
@@ -24,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from generate_animated_text import estimate_phrase_html_duration_seconds
@@ -77,9 +79,14 @@ def main() -> None:
         help="每页播完后到下一页之间的间隔（秒）",
     )
     parser.add_argument(
+        "--no-export-mp4",
+        action="store_true",
+        help="不自动导出 MP4（默认会在生成 HTML 后调用 export_mp4_from_html.js）",
+    )
+    parser.add_argument(
         "--export-mp4",
         action="store_true",
-        help="生成完成后调用仓库根目录 export_mp4_from_html.js 导出故事 MP4（需 Node、playwright、ffmpeg）",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--mp4-out",
@@ -88,8 +95,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--mp4-fps",
-        default="48",
-        help="传给 export_mp4_from_html.js 的 --fps（默认 48，≥40）",
+        default=None,
+        help="已废弃：当前导出为浏览器 recordVideo（约 25fps），不再传此参数",
     )
     parser.add_argument(
         "--mp4-width",
@@ -190,13 +197,13 @@ def main() -> None:
     )
     print(f"打开连续播放：{index_html}")
 
-    if args.export_mp4:
+    if not args.no_export_mp4:
         export_js = repo_root / "export_mp4_from_html.js"
         if not export_js.is_file():
-            raise SystemExit(f"--export-mp4 需要存在 {export_js}")
+            raise SystemExit(f"自动导出需要存在 {export_js}")
         node = shutil.which("node")
         if not node:
-            raise SystemExit("未在 PATH 中找到 node，无法 --export-mp4")
+            raise SystemExit("未在 PATH 中找到 node，无法导出 MP4（可加 --no-export-mp4 跳过）")
         mp4_path = (
             Path(args.mp4_out).expanduser().resolve()
             if args.mp4_out
@@ -210,8 +217,6 @@ def main() -> None:
             str(out_dir),
             "--out",
             str(mp4_path),
-            "--fps",
-            str(args.mp4_fps),
         ]
         if args.mp4_width:
             cmd.extend(["--width", str(args.mp4_width)])
@@ -219,9 +224,19 @@ def main() -> None:
             cmd.extend(["--height", str(args.mp4_height)])
         if not args.mp4_show_bar:
             cmd.append("--hide-bar")
-        print("导出 MP4 …", " ".join(cmd))
-        subprocess.run(cmd, cwd=str(repo_root), check=True)
-        print(f"MP4：{mp4_path}")
+        print("正在导出 MP4 …")
+        print(" ", " ".join(cmd))
+        t0 = time.perf_counter()
+        try:
+            subprocess.run(cmd, cwd=str(repo_root), check=True)
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(f"导出 MP4 失败（退出码 {e.returncode}），可先 --no-export-mp4 只生成 HTML") from e
+        elapsed = time.perf_counter() - t0
+        size_mb = mp4_path.stat().st_size / (1024 * 1024)
+        print(
+            f"MP4 导出成功：{mp4_path}\n"
+            f"  耗时 {elapsed:.1f}s  约 {size_mb:.2f} MiB"
+        )
 
 
 def _build_index_html(
