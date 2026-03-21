@@ -12,7 +12,21 @@ import argparse
 import html
 import os
 import re
+import shutil
+import sys
+from pathlib import Path
 from typing import Optional
+
+
+def resolve_hand_image_path(hand_image: str, repo_root: Path) -> Optional[Path]:
+    """解析手形 PNG：先试当前工作目录，再试仓库根（与默认「手形1.png」一致）。"""
+    p = Path(hand_image)
+    if p.is_file():
+        return p.resolve()
+    q = (repo_root / hand_image).resolve()
+    if q.is_file():
+        return q
+    return None
 
 
 ANIM_DELAY_RE = re.compile(r"animation-delay:\s*([0-9]+(?:\.[0-9]+)?)s;")
@@ -600,7 +614,8 @@ def main() -> None:
     parser.add_argument(
         "--hand-image",
         default="手形1.png",
-        help="手形图片路径（默认：手形1.png）；如果文件不存在则不会注入手形",
+        help="手形图片路径（默认：手形1.png，会在当前目录与脚本所在仓库根目录查找）；"
+        "生成时会复制到输出 HTML 同目录以便相对路径加载；找不到则跳过手形",
     )
     parser.add_argument("--hand-width", type=int, default=120, help="手形显示宽度（px）")
     parser.add_argument("--hand-height", type=int, default=105, help="手形显示高度（px）")
@@ -628,10 +643,25 @@ def main() -> None:
         phrase = "测试测试测试\n看起来不错"
     svg_dir = args.svg_dir
     out_path = args.out
+    repo_root = Path(__file__).resolve().parent
 
-    # 如果默认 hand 图片不存在，就自动降级为不跟随手
-    if args.hand_image and not os.path.exists(args.hand_image):
-        args.hand_image = None
+    # 手形图：解析源文件，并复制到输出 HTML 同目录（避免 story_output/page.html 相对路径找不到根目录的 PNG）
+    hand_image_url: Optional[str] = None
+    if args.hand_image:
+        hand_src = resolve_hand_image_path(args.hand_image, repo_root)
+        if hand_src:
+            out_parent = Path(out_path).expanduser().resolve().parent
+            out_parent.mkdir(parents=True, exist_ok=True)
+            dest_hand = out_parent / hand_src.name
+            if dest_hand.resolve() != hand_src.resolve():
+                shutil.copy2(hand_src, dest_hand)
+            # HTML 内只用文件名，与输出文件同目录即可加载
+            hand_image_url = hand_src.name
+        else:
+            print(
+                f"警告：找不到手形图片「{args.hand_image}」（已试过当前目录与 {repo_root}），将不显示手形。",
+                file=sys.stderr,
+            )
 
     if not os.path.isdir(svg_dir):
         raise SystemExit(f"找不到 svg 目录：{svg_dir}（请检查 --svg-dir）")
@@ -675,7 +705,7 @@ def main() -> None:
 
         svg_text = scale_animation_times(svg_text, speed=args.speed)
 
-        if args.hand_image:
+        if hand_image_url:
             timeline = extract_stroke_timeline(svg_text, prefix=prefix)
             if timeline:
                 if args.hand_mode == "per-char":
@@ -684,7 +714,7 @@ def main() -> None:
                     svg_text = inject_hand_image(
                         svg_text=svg_text,
                         prefix=prefix,
-                        hand_image_href=args.hand_image,
+                        hand_image_href=hand_image_url,
                         hand_width=hand_w,
                         hand_height=hand_h,
                         opacity=args.hand_opacity,
@@ -723,7 +753,7 @@ def main() -> None:
         pieces_html.append(svg_to_html(svg_text, char_size=args.char_size))
 
     hand_js = ""
-    if args.hand_image:
+    if hand_image_url:
         if args.hand_mode == "per-char" and hand_tracks:
             hand_js = build_hand_js(
                 tracks=hand_tracks,
@@ -739,7 +769,7 @@ def main() -> None:
             hand_h = int(args.hand_height * args.hand_scale)
             hand_js = build_hand_overlay_js(
                 stroke_items=stroke_items,
-                hand_image_href=args.hand_image,
+                hand_image_href=hand_image_url,
                 hand_width=hand_w,
                 hand_height=hand_h,
                 hand_opacity=args.hand_opacity,
