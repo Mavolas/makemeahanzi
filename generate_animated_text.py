@@ -751,11 +751,11 @@ def main() -> None:
     parser.add_argument("phrase", nargs="?", default=None, help="要生成的文字，例如：我是最棒的")
     parser.add_argument("--out", default="phrase.html", help="输出 HTML 文件路径")
     parser.add_argument("--svg-dir", default="svgs", help="动画 SVG 目录（默认：svgs）")
-    parser.add_argument("--char-size", type=int, default=150, help="每个字显示尺寸（px）")
+    parser.add_argument("--char-size", type=int, default=146, help="每个字显示尺寸（px）")
     parser.add_argument(
         "--stroke-width-px",
         type=float,
-        default=7.0,
+        default=11.0,
         metavar="PX",
         help="笔画线宽（约等于屏幕像素），按 viewBox 与 --char-size 换算后写入 SVG 动画；≤0 保留源 SVG 线宽",
     )
@@ -766,8 +766,8 @@ def main() -> None:
         metavar="R",
         help="每个笔画动画内：书写最细相对写完最粗的比例（0～1）。1=全程等粗（推荐，避免细灰/粗黑混杂）；0.5～0.65 略有粗细变化；0.125≈MMH 原始 128/1024",
     )
-    parser.add_argument("--gap-px", type=int, default=10, help="字与字之间间距（px）")
-    parser.add_argument("--line-gap-px", type=int, default=48, help="两行之间的垂直间距（px）")
+    parser.add_argument("--gap-px", type=int, default=8, help="字与字之间间距（px）")
+    parser.add_argument("--line-gap-px", type=int, default=46, help="两行之间的垂直间距（px）")
     parser.add_argument("--canvas-width", type=int, default=1054, help="固定背景画布宽度（px）")
     parser.add_argument("--canvas-height", type=int, default=588, help="固定背景画布高度（px）")
     parser.add_argument(
