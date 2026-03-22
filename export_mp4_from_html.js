@@ -129,7 +129,7 @@ function parseFadeMsFromIndexHtml(htmlText) {
     const n = parseInt(m[1], 10);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  return 1000;
+  return 500;
 }
 
 function printUsage() {

@@ -45,8 +45,8 @@ def _story_index_bridge_script() -> str:
   window.addEventListener("message", function (ev) {{
     var d = ev.data;
     if (!d || d.storyBridge !== BRIDGE) return;
-    var css = d.fadeCss || "1s";
-    var ms = Math.max(1, parseInt(d.fadeMs, 10) || 1000);
+    var css = d.fadeCss || "0.5s";
+    var ms = Math.max(1, parseInt(d.fadeMs, 10) || 500);
     if (d.cmd === "fadeOut") {{
       var ph = phrase(), h = hand();
       if (!ph) {{

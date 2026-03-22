@@ -230,7 +230,7 @@ def _default_output_root() -> Path:
         return root.resolve()
     except Exception:
         return (repo_root / "story_output").resolve()
-_FADE_OUT_SECONDS = 1.0
+_FADE_OUT_SECONDS = 0.5
 
 # index 页间切换：命令行 --story-page-transition
 _STORY_PAGE_TRANSITION_DEFAULT = "default"
