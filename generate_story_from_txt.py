@@ -9,7 +9,8 @@
 再只问一次「每个文稿统一生成多少套」。
 默认目录结构（在 path_config.BASE_DIR/中间文本/ 下）：
   · HTML：{文案名}_草稿/（多套时其下再有 {文案名}_01、_02 …）
-  · MP4：{文案名}_成稿/，文件名带套数且冲突时自动加后缀，避免覆盖。
+  · MP4：{文案名}_成稿/；默认按「橱窗」首次出现页在该页时长中点时的累计时刻命名（含页间淡出），
+    如 文案13_惊天反击-03+40+13 (1).mp4；冲突自动 (2)(3)…；可用 --no-story-mp4-time-keyword 恢复旧命名。
 
 用法示例：
   python3 generate_story_from_txt.py
@@ -60,6 +61,10 @@ def _default_output_root() -> Path:
     except Exception:
         return (repo_root / "story_output").resolve()
 _FADE_OUT_SECONDS = 1.0
+
+# 成稿 MP4：默认用「关键词首次出现页」在整段播放到该页时长中点时的累计时刻（含页间淡出）命名
+_DEFAULT_STORY_MP4_TIME_KEYWORD = "橱窗"
+_DEFAULT_STORY_MP4_TIME_SUFFIX = "13"
 
 _HOMEBREW_FFMPEG_CANDIDATES = (
     "/opt/homebrew/bin/ffmpeg",
@@ -126,7 +131,7 @@ def _story_suffixes() -> tuple[str, str]:
 
 
 def _allocate_mp4_path(final_dir: Path, stem: str, run_k: int, n_runs: int) -> Path:
-    """成稿目录下分配不冲突的 mp4 路径。"""
+    """成稿目录下分配不冲突的 mp4 路径（未启用关键词时间命名时）。"""
     final_dir.mkdir(parents=True, exist_ok=True)
     if n_runs > 1:
         root = final_dir / f"{stem}_{run_k:02d}.mp4"
@@ -142,6 +147,62 @@ def _allocate_mp4_path(final_dir: Path, stem: str, run_k: int, n_runs: int) -> P
         if not p.exists():
             return p
     raise SystemExit("无法生成不冲突的 MP4 文件名")
+
+
+def find_first_page_index_with_keyword(pages: list[str], keyword: str) -> int | None:
+    """返回关键词首次出现的页下标（0-based）；未出现则 None。"""
+    if not keyword:
+        return None
+    for i, text in enumerate(pages):
+        if keyword in text:
+            return i
+    return None
+
+
+def timeline_mid_of_page_sec(
+    page_idx: int,
+    durations: list[float],
+    fade_out_seconds: float,
+) -> float:
+    """
+    与 index.html 一致：每页播完后再经过 fade 才进入下一页。
+    返回「第 page_idx 页开始后再过该页时长一半」时，从整段起点算起的秒数（含此前全部内容与过渡）。
+    """
+    if page_idx < 0 or page_idx >= len(durations):
+        return 0.0
+    elapsed = 0.0
+    for i in range(page_idx):
+        elapsed += durations[i] + fade_out_seconds
+    return elapsed + durations[page_idx] / 2.0
+
+
+def _seconds_to_mm_ss_pair(total_sec: float) -> tuple[str, str]:
+    """用于文件名中的 分+秒，各两位，如 3分40秒 → 03, 40。"""
+    t = max(0, int(round(total_sec)))
+    mm = t // 60
+    ss = t % 60
+    return f"{mm:02d}", f"{ss:02d}"
+
+
+def _allocate_keyword_time_mp4_path(
+    final_dir: Path,
+    stem: str,
+    mm: str,
+    ss: str,
+    fixed_suffix: str,
+) -> Path:
+    """
+    例：文案13_惊天反击-03+40+13 (1).mp4；同名冲突则 (2)、(3)…
+    fixed_suffix 为用户要求的固定段（默认 13）。
+    """
+    final_dir.mkdir(parents=True, exist_ok=True)
+    safe_suffix = fixed_suffix.strip() or _DEFAULT_STORY_MP4_TIME_SUFFIX
+    for n in range(1, 10000):
+        name = f"{stem}-{mm}+{ss}+{safe_suffix} ({n}).mp4"
+        p = final_dir / name
+        if not p.exists():
+            return p
+    raise SystemExit("无法生成不冲突的关键词时间 MP4 文件名")
 
 
 def _preview_txt(path: Path) -> tuple[str, list[str], list[str]]:
@@ -206,6 +267,12 @@ def generate_one_story(
     repo_root: Path,
     export_mp4: bool,
     mp4_out: Path | None,
+    mp4_final_dir: Path | None = None,
+    mp4_naming_stem: str | None = None,
+    mp4_run_k: int = 1,
+    mp4_n_runs: int = 1,
+    story_mp4_time_keyword: str | None = None,
+    story_mp4_time_suffix: str = _DEFAULT_STORY_MP4_TIME_SUFFIX,
     mp4_width: str | None,
     mp4_height: str | None,
     mp4_show_bar: bool,
@@ -253,12 +320,32 @@ def generate_one_story(
     total_content = sum(durations)
     fade_count = max(0, len(durations) - 1)
     total_with_fade = total_content + fade_count * _FADE_OUT_SECONDS
+
+    kw = (story_mp4_time_keyword or "").strip()
+    hi_page0: int | None = None
+    hi_mid_sec: float | None = None
+    hi_mm = hi_ss = None
+    if kw:
+        hi_page0 = find_first_page_index_with_keyword(pages, kw)
+        if hi_page0 is not None:
+            hi_mid_sec = timeline_mid_of_page_sec(
+                hi_page0, durations, _FADE_OUT_SECONDS
+            )
+            hi_mm, hi_ss = _seconds_to_mm_ss_pair(hi_mid_sec)
+
     meta = {
         "source_txt": txt_path.name,
         "pages": page_files,
         "durations": durations,
         "total_content_sec": round(total_content, 3),
         "total_with_fade_sec": round(total_with_fade, 3),
+        "fade_out_seconds": _FADE_OUT_SECONDS,
+        "highlight_keyword": kw or None,
+        "highlight_first_page_1based": (hi_page0 + 1) if hi_page0 is not None else None,
+        "highlight_mid_timeline_sec": round(hi_mid_sec, 3)
+        if hi_mid_sec is not None
+        else None,
+        "highlight_mm_plus_ss": f"{hi_mm}+{hi_ss}" if hi_mm is not None else None,
     }
     (out_dir / "story_meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
@@ -282,11 +369,27 @@ def generate_one_story(
         node = shutil.which("node")
         if not node:
             raise SystemExit("未在 PATH 中找到 node（可加 --no-export-mp4 跳过）")
-        mp4_path = (
-            Path(mp4_out).expanduser().resolve()
-            if mp4_out
-            else (out_dir / "story.mp4")
-        )
+        if mp4_out is not None:
+            mp4_path = Path(mp4_out).expanduser().resolve()
+        elif mp4_final_dir is not None and mp4_naming_stem:
+            stem_name = mp4_naming_stem
+            suffix_fix = (story_mp4_time_suffix or _DEFAULT_STORY_MP4_TIME_SUFFIX).strip()
+            if kw and hi_page0 is not None and hi_mm is not None:
+                mp4_path = _allocate_keyword_time_mp4_path(
+                    mp4_final_dir, stem_name, hi_mm, hi_ss, suffix_fix
+                )
+                print(
+                    f"    成稿 MP4：关键词「{kw}」首次第 {hi_page0 + 1} 页，"
+                    f"该页时长中点时刻 ≈ {hi_mid_sec:.2f}s（含页间淡出）→ {mp4_path.name}"
+                )
+            else:
+                if kw and hi_page0 is None:
+                    print(f"    未在文案分页中找到「{kw}」，成稿 MP4 使用默认命名")
+                mp4_path = _allocate_mp4_path(
+                    mp4_final_dir, stem_name, mp4_run_k, mp4_n_runs
+                )
+        else:
+            mp4_path = out_dir / "story.mp4"
         mp4_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             node,
@@ -385,6 +488,24 @@ def main() -> None:
         help="导出时保留进度栏",
     )
     parser.add_argument(
+        "--story-mp4-time-keyword",
+        default=_DEFAULT_STORY_MP4_TIME_KEYWORD,
+        metavar="KW",
+        help="成稿 MP4 文件名中的时刻：关键词在分页后首次出现的页，取该页播放到时长中点时的累计秒数"
+        "（含页间淡出），格式为 分+秒+固定段+(编号)。默认：橱窗",
+    )
+    parser.add_argument(
+        "--no-story-mp4-time-keyword",
+        action="store_true",
+        help="关闭关键词时刻命名，仍用 文案名.mp4 或 文案名_01.mp4",
+    )
+    parser.add_argument(
+        "--story-mp4-time-suffix",
+        default=_DEFAULT_STORY_MP4_TIME_SUFFIX,
+        metavar="SUF",
+        help="文件名中「分+秒」之后的固定段，默认 13",
+    )
+    parser.add_argument(
         "gen_args",
         nargs=argparse.REMAINDER,
         help="传给 generate_animated_text.py（前请加 --）",
@@ -413,13 +534,24 @@ def main() -> None:
         draft_root = base_out / f"{stem}{draft_sfx}"
         final_root = base_out / f"{stem}{final_sfx}"
         html_out = draft_root
+        time_kw = (
+            None
+            if args.no_story_mp4_time_keyword
+            else (args.story_mp4_time_keyword.strip() or None)
+        )
         if export_mp4:
             if args.mp4_out:
                 mp4_single = Path(args.mp4_out).expanduser().resolve()
+                mp4_final = None
+                naming_stem = None
             else:
-                mp4_single = _allocate_mp4_path(final_root, stem, 1, 1)
+                mp4_single = None
+                mp4_final = final_root
+                naming_stem = stem
         else:
             mp4_single = None
+            mp4_final = None
+            naming_stem = None
         generate_one_story(
             txt_path=txt_path,
             out_dir=html_out,
@@ -428,6 +560,12 @@ def main() -> None:
             repo_root=repo_root,
             export_mp4=export_mp4,
             mp4_out=mp4_single,
+            mp4_final_dir=mp4_final,
+            mp4_naming_stem=naming_stem,
+            mp4_run_k=1,
+            mp4_n_runs=1,
+            story_mp4_time_keyword=time_kw,
+            story_mp4_time_suffix=args.story_mp4_time_suffix,
             mp4_width=args.mp4_width,
             mp4_height=args.mp4_height,
             mp4_show_bar=args.mp4_show_bar,
@@ -489,15 +627,15 @@ def main() -> None:
                 out_dir = draft_root / f"{stem}_{k:02d}"
             else:
                 out_dir = draft_root
-            mp4_target = (
-                _allocate_mp4_path(final_root, stem, k, n)
-                if export_mp4
-                else None
-            )
             total_jobs += 1
+            time_kw = (
+                None
+                if args.no_story_mp4_time_keyword
+                else (args.story_mp4_time_keyword.strip() or None)
+            )
             print(f"\n>>> [{total_jobs}] {txt_path.name} 第 {k}/{n} 套 → {out_dir}")
             if export_mp4:
-                print(f"    MP4 → {mp4_target}")
+                print(f"    成稿目录：{final_root}")
             try:
                 generate_one_story(
                     txt_path=txt_path,
@@ -506,7 +644,13 @@ def main() -> None:
                     gen_extra=gen_extra,
                     repo_root=repo_root,
                     export_mp4=export_mp4,
-                    mp4_out=mp4_target,
+                    mp4_out=None,
+                    mp4_final_dir=final_root if export_mp4 else None,
+                    mp4_naming_stem=stem if export_mp4 else None,
+                    mp4_run_k=k,
+                    mp4_n_runs=n,
+                    story_mp4_time_keyword=time_kw,
+                    story_mp4_time_suffix=args.story_mp4_time_suffix,
                     mp4_width=args.mp4_width,
                     mp4_height=args.mp4_height,
                     mp4_show_bar=args.mp4_show_bar,
