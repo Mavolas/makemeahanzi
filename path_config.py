@@ -14,7 +14,8 @@ STORY_OUTPUT_SUBDIR = "中间文本"
 # 可选：放在 BASE_DIR 下，内含背景图时 story 生成会以 5:1 权重相对纯色随机抽一张铺画布（cover）
 STORY_BG_IMAGES_SUBDIR = "中间文本背景"
 
-# 其下：HTML 等生成物在「{安全文件名}{STORY_DRAFT_SUFFIX}」；导出 MP4 在「{安全文件名}{STORY_FINAL_SUFFIX}」
+# 其下：HTML 等在「{安全文件名}{STORY_DRAFT_SUFFIX}」；MP4 在「{安全文件名}{STORY_FINAL_SUFFIX}」（与草稿同级）。
+# generate_story_from_txt 在 MP4 导出成功后只删草稿目录，不移动、不删成稿目录。
 STORY_DRAFT_SUFFIX = "_草稿"
 STORY_FINAL_SUFFIX = "_成稿"
 

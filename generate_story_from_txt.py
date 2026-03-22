@@ -12,7 +12,8 @@ index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡
 再只问一次「每个文稿统一生成多少套」。
 默认目录结构（在 path_config.BASE_DIR/中间文本/ 下）：
   · HTML：{文案名}_草稿/（多套时其下再有 {文案名}_01、_02 …）
-  · MP4：{文案名}_成稿/；默认按「橱窗」首次出现页在该页时长中点时的累计时刻命名（含页间淡出），
+  · MP4：{文案名}_成稿/（与草稿同级，仍在输出根目录如「中间文本」下）；默认按「橱窗」首次出现页在该页时长中点时的累计时刻命名（含页间淡出），
+    启用自动导出 MP4 且全部成功后，仅删除 path_config 中 STORY_DRAFT_SUFFIX 对应的「{文案名}_草稿」目录，不移动、不删除 STORY_FINAL_SUFFIX 成稿目录。
     如 文案13_惊天反击-03+40+13 (1).mp4；冲突自动 (2)(3)…；可用 --no-story-mp4-time-keyword 恢复旧命名。
   wenan 批量且需导出多个 MP4 时，默认最多 2 路并行调用 Node/Playwright 导出（可用 --mp4-export-workers 调整；1 为顺序）。
 
@@ -333,6 +334,17 @@ def _story_suffixes() -> tuple[str, str]:
         return str(STORY_DRAFT_SUFFIX), str(STORY_FINAL_SUFFIX)
     except Exception:
         return "_草稿", "_成稿"
+
+
+def _remove_story_draft_dir(draft_root: Path) -> None:
+    """导出 MP4 成功后仅删除 STORY_DRAFT_SUFFIX 对应的草稿目录（HTML、story_meta 等）；成稿目录不动。"""
+    if not draft_root.is_dir():
+        return
+    try:
+        shutil.rmtree(draft_root)
+    except OSError as e:
+        raise SystemExit(f"无法删除草稿目录：{draft_root}\n{e}") from e
+    print(f"已删除草稿目录：{draft_root}")
 
 
 def _allocate_mp4_path(
@@ -881,7 +893,10 @@ def main() -> None:
             mp4_show_bar=args.mp4_show_bar,
             shouxing_dir=args.shouxing_dir,
         )
-        print(f"打开连续播放：{html_out / 'index.html'}")
+        if export_mp4:
+            _remove_story_draft_dir(draft_root)
+        else:
+            print(f"打开连续播放：{html_out / 'index.html'}")
         return
 
     wenan_dir = (repo_root / args.wenan_dir).resolve()
@@ -1009,6 +1024,11 @@ def main() -> None:
             for lbl, exc in errors:
                 print(f"MP4 导出失败 {lbl}: {exc}", file=sys.stderr)
             raise SystemExit(f"{len(errors)} 个 MP4 导出失败")
+
+    if export_mp4:
+        for txt_path in nonempty:
+            stem = _safe_output_stem(txt_path)
+            _remove_story_draft_dir(base_out / f"{stem}{draft_sfx}")
 
     print(f"\n全部完成：共 {total_jobs} 套，根目录 {base_out}")
 
