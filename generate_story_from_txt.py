@@ -6,7 +6,9 @@
 未在「--」后指定 --canvas-bg / --canvas-bg-image 时：若 path_config.BASE_DIR/中间文本背景 存在且含图片，
   则以 5:1 权重相对「仅纯色」随机选背景图（CSS cover 铺满，小图等比放大）并配随机淡色底；否则仅随机纯色（与 backgrounds.py 一致）。
   指定 --canvas-bg 或 --canvas-bg-image 则全 story 按参数，不再走上述逻辑。
-index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡入到透明，逻辑与原先白幕相同）。
+index.html 页间切换可用 --story-page-transition 配置（默认 text=方式2）：
+  · text（方式2，默认）：子页注入 --story-index-bridge，由 index 通过 postMessage 触发页内 .phrase / #handOverlay 淡出（file:// 下父页无法读 iframe 文档时仍有效）；底色与背景图在 .canvas-backdrop 上不动。
+  · default（方式1）：有 --canvas-bg-image 时为整页 iframe 淡入淡出；纯 --canvas-bg 时为同色遮罩后切页。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
 再只问一次「每个文稿统一生成多少套」。
@@ -23,9 +25,11 @@ index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡
   python3 generate_story_from_txt.py --no-export-mp4
   python3 generate_story_from_txt.py 其它文案.txt --out-dir out -- --speed 2 --char-size 140
   python3 generate_story_from_txt.py --wenan-dir 我的文案夹
+  python3 generate_story_from_txt.py --story-page-transition default
 
 「--」 后面的参数会原样传给 generate_animated_text.py。
 未写 --stroke-draw-ratio 时，story 会默认注入 1.0（笔画全程等粗）；若需细→粗变化可在「--」后自行传该参数覆盖。
+未在「--」后指定 --speed 时，每套 story 在 7.5～8.5 间随机一个速率，该套内各页共用同一数值。
 仓库根下 shouxing/ 内放多个手形 PNG 时，每套 story 随机选一张，全套页共用；「--」里已传 --hand-image 则不随机。
 """
 
@@ -45,7 +49,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from generate_animated_text import estimate_phrase_html_duration_seconds
+from generate_animated_text import (
+    STORY_INDEX_BRIDGE_ID,
+    estimate_phrase_html_duration_seconds,
+)
 from backgrounds import pick_random_canvas_background
 
 _WENAN_DIR_NAME = "wenan"
@@ -128,6 +135,20 @@ def _gen_extra_has_stroke_draw_ratio(extra: list[str]) -> bool:
     return False
 
 
+def _gen_extra_has_speed(extra: list[str]) -> bool:
+    """是否已指定 --speed（传给 generate_animated_text）。"""
+    for tok in extra:
+        if tok == "--speed":
+            return True
+        if tok.startswith("--speed="):
+            return True
+    return False
+
+
+def _gen_extra_has_story_index_bridge(extra: list[str]) -> bool:
+    return "--story-index-bridge" in extra
+
+
 def _gen_extra_has_hand_image(extra: list[str]) -> bool:
     """是否已指定手形图（--hand-image）。"""
     for tok in extra:
@@ -175,6 +196,25 @@ def parse_canvas_bg_hex_from_gen_extra(extra: list[str]) -> str | None:
     return None
 
 
+def _parse_canvas_bg_image_basename_from_extra(extra: list[str]) -> str | None:
+    """从 gen_extra 解析 --canvas-bg-image 的文件名（与输出目录下文件名一致）。"""
+    i = 0
+    while i < len(extra):
+        tok = extra[i]
+        if tok == "--canvas-bg-image" and i + 1 < len(extra):
+            raw = extra[i + 1].strip()
+            if raw and not raw.startswith("-"):
+                return Path(raw).name
+            return None
+        if tok.startswith("--canvas-bg-image="):
+            raw = tok.split("=", 1)[1].strip()
+            if raw:
+                return Path(raw).name
+            return None
+        i += 1
+    return None
+
+
 def _default_output_root() -> Path:
     """默认输出：path_config.BASE_DIR / STORY_OUTPUT_SUBDIR；失败则用仓库内 story_output。"""
     repo_root = Path(__file__).resolve().parent
@@ -186,6 +226,27 @@ def _default_output_root() -> Path:
     except Exception:
         return (repo_root / "story_output").resolve()
 _FADE_OUT_SECONDS = 1.0
+
+# index 页间切换：命令行 --story-page-transition
+_STORY_PAGE_TRANSITION_DEFAULT = "default"
+_STORY_PAGE_TRANSITION_TEXT = "text"
+
+
+def _index_transition_kind(story_page_transition: str, has_background_image: bool) -> str:
+    """
+    解析为写入 index.html 的 JS 分支：
+    iframe_crossfade / color_overlay（方式1 的两种子策略）/ inner_text_fade（方式2）。
+    """
+    if story_page_transition == _STORY_PAGE_TRANSITION_TEXT:
+        return "inner_text_fade"
+    if has_background_image:
+        return "iframe_crossfade"
+    return "color_overlay"
+
+
+# 未传 --speed 时，每套 story 随机速率（该套内各页一致）
+_STORY_SPEED_RANDOM_MIN = 7.5
+_STORY_SPEED_RANDOM_MAX = 8.5
 
 # 成稿 MP4：默认用「关键词首次出现页」在整段播放到该页时长中点时的累计时刻（含页间淡出）命名
 _DEFAULT_STORY_MP4_TIME_KEYWORD = "橱窗"
@@ -520,6 +581,7 @@ def generate_one_story(
     mp4_job_label: str = "",
     mp4_export_print_lock: threading.Lock | None = None,
     mp4_reserved_paths: set[str] | None = None,
+    story_page_transition: str = _STORY_PAGE_TRANSITION_TEXT,
 ) -> None:
     lines = load_non_empty_lines(txt_path)
     if not lines:
@@ -540,6 +602,10 @@ def generate_one_story(
     if not _gen_extra_has_stroke_draw_ratio(effective_extra):
         # 与 generate_animated_text 默认一致：全程等粗，避免 story 批量时仍见细线/粗线混杂
         effective_extra = ["--stroke-draw-ratio", "1.0", *effective_extra]
+    if not _gen_extra_has_speed(effective_extra):
+        story_speed = random.uniform(_STORY_SPEED_RANDOM_MIN, _STORY_SPEED_RANDOM_MAX)
+        effective_extra = ["--speed", f"{story_speed:.4f}", *effective_extra]
+        print(f"    本套 story 随机 --speed：{story_speed:.4f}（{len(pages)} 页共用）")
     if not _gen_extra_has_hand_image(effective_extra):
         sx_root = (repo_root / shouxing_dir).resolve()
         sx_pngs = _list_shouxing_pngs(sx_root)
@@ -586,6 +652,10 @@ def generate_one_story(
     story_canvas_bg = parse_canvas_bg_hex_from_gen_extra(effective_extra)
     if not story_canvas_bg:
         story_canvas_bg = "#e8e8e8"
+
+    if story_page_transition == _STORY_PAGE_TRANSITION_TEXT:
+        if not _gen_extra_has_story_index_bridge(effective_extra):
+            effective_extra = ["--story-index-bridge", *effective_extra]
 
     for idx, phrase in enumerate(pages, start=1):
         name = f"page_{idx:03d}.html"
@@ -638,18 +708,43 @@ def generate_one_story(
         else None,
         "highlight_mm_plus_ss": f"{hi_mm}+{hi_ss}" if hi_mm is not None else None,
     }
+
+    bg_img_bn = story_bg_image_basename or _parse_canvas_bg_image_basename_from_extra(
+        effective_extra
+    )
+    transition_kind = _index_transition_kind(story_page_transition, bool(bg_img_bn))
+    _tp_desc = {
+        "iframe_crossfade": (
+            f"方式1·有背景图：整页 iframe 淡入淡出（{_FADE_OUT_SECONDS:g}s）"
+        ),
+        "color_overlay": f"方式1·纯色画布：同色遮罩切页（{_FADE_OUT_SECONDS:g}s）",
+        "inner_text_fade": (
+            f"方式2：仅短语与手形淡出，画布背景不动（{_FADE_OUT_SECONDS:g}s）"
+        ),
+    }
+    print(f"    页间过渡：{_tp_desc[transition_kind]}")
+    meta["story_page_transition"] = story_page_transition
+    meta["transition_kind"] = transition_kind
+    meta["fade_layer_background"] = story_canvas_bg
+    meta["fade_overlay_max_opacity"] = 1.0
+
     (out_dir / "story_meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
     index_html = out_dir / "index.html"
+    story_bridge_id_js = json.dumps(
+        STORY_INDEX_BRIDGE_ID if transition_kind == "inner_text_fade" else ""
+    )
     index_html.write_text(
         _build_index_html(
             page_files,
             durations,
             fade_out_seconds=_FADE_OUT_SECONDS,
             stage_background=story_canvas_bg,
+            transition_kind=transition_kind,
+            story_bridge_id_js=story_bridge_id_js,
         ),
         encoding="utf-8",
     )
@@ -768,6 +863,14 @@ def main() -> None:
         type=float,
         default=0.35,
         help="每页时长估算附加秒数",
+    )
+    parser.add_argument(
+        "--story-page-transition",
+        choices=(_STORY_PAGE_TRANSITION_DEFAULT, _STORY_PAGE_TRANSITION_TEXT),
+        default=_STORY_PAGE_TRANSITION_TEXT,
+        metavar="MODE",
+        help="index 页间切换（默认 text）：text=方式2 仅文字与手形淡出、背景不动；"
+        "default=方式1（有背景图则整页淡入淡出，否则同色遮罩）",
     )
     parser.add_argument(
         "--no-export-mp4",
@@ -892,6 +995,7 @@ def main() -> None:
             mp4_height=args.mp4_height,
             mp4_show_bar=args.mp4_show_bar,
             shouxing_dir=args.shouxing_dir,
+            story_page_transition=args.story_page_transition,
         )
         if export_mp4:
             _remove_story_draft_dir(draft_root)
@@ -999,6 +1103,7 @@ def main() -> None:
                     mp4_job_label=f"[{total_jobs}]",
                     mp4_export_print_lock=mp4_print_lock,
                     mp4_reserved_paths=mp4_reserved_paths,
+                    story_page_transition=args.story_page_transition,
                 )
             except subprocess.CalledProcessError as e:
                 raise SystemExit(f"子进程失败（退出码 {e.returncode}）") from e
@@ -1039,12 +1144,16 @@ def _build_index_html(
     *,
     fade_out_seconds: float = _FADE_OUT_SECONDS,
     stage_background: str = "#ffffff",
+    transition_kind: str = "color_overlay",
+    story_bridge_id_js: str = '""',
 ) -> str:
     pages_json = json.dumps(pages, ensure_ascii=False)
     durs_json = json.dumps(durations)
     fade_ms = max(1, int(round(fade_out_seconds * 1000)))
     fade_css_js = json.dumps(f"{fade_out_seconds:g}s")
     safe_stage_bg = html.escape(stage_background)
+    safe_fade_layer_bg = safe_stage_bg
+    kind_js = json.dumps(transition_kind)
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -1073,7 +1182,7 @@ def _build_index_html(
     #whiteFade {{
       position: absolute;
       inset: 0;
-      background: {safe_stage_bg};
+      background: {safe_fade_layer_bg};
       opacity: 0;
       pointer-events: none;
     }}
@@ -1101,11 +1210,23 @@ def _build_index_html(
     const durs = {durs_json};
     const FADE_MS = {fade_ms};
     const FADE_CSS = {fade_css_js};
+    const TRANSITION_KIND = {kind_js};
+    const STORY_BRIDGE_ID = {story_bridge_id_js};
     const bar = document.getElementById('bar');
     const view = document.getElementById('view');
     const whiteFade = document.getElementById('whiteFade');
     let timer = null;
     let fadeTimer = null;
+    let pendingAfterFadeOut = null;
+    let pendingAfterFadeIn = null;
+    let bridgeFailSafe = null;
+
+    function clearBridgeFailSafe() {{
+      if (bridgeFailSafe) {{
+        clearTimeout(bridgeFailSafe);
+        bridgeFailSafe = null;
+      }}
+    }}
 
     function clearTimers() {{
       if (timer) {{
@@ -1116,10 +1237,55 @@ def _build_index_html(
         clearTimeout(fadeTimer);
         fadeTimer = null;
       }}
+      pendingAfterFadeOut = null;
+      pendingAfterFadeIn = null;
+      clearBridgeFailSafe();
     }}
 
     function setBar(text) {{
       bar.textContent = text;
+    }}
+
+    window.addEventListener('message', function (ev) {{
+      if (!STORY_BRIDGE_ID) return;
+      var d = ev.data;
+      if (!d || d.storyBridge !== STORY_BRIDGE_ID) return;
+      if (d.cmd === 'fadeOutDone') {{
+        clearBridgeFailSafe();
+        if (pendingAfterFadeOut) {{
+          var f = pendingAfterFadeOut;
+          pendingAfterFadeOut = null;
+          f();
+        }}
+        return;
+      }}
+      if (d.cmd === 'fadeInDone') {{
+        clearBridgeFailSafe();
+        if (pendingAfterFadeIn) {{
+          var g = pendingAfterFadeIn;
+          pendingAfterFadeIn = null;
+          g();
+        }}
+        return;
+      }}
+    }});
+
+    function postStoryBridge(cmd, extra) {{
+      var w = view.contentWindow;
+      if (!w || !STORY_BRIDGE_ID) return false;
+      var msg = {{
+        storyBridge: STORY_BRIDGE_ID,
+        cmd: cmd,
+        fadeCss: FADE_CSS,
+        fadeMs: FADE_MS
+      }};
+      if (extra) {{
+        for (var k in extra) {{
+          if (Object.prototype.hasOwnProperty.call(extra, k)) msg[k] = extra[k];
+        }}
+      }}
+      w.postMessage(msg, '*');
+      return true;
     }}
 
     function show(i) {{
@@ -1128,13 +1294,75 @@ def _build_index_html(
         setBar('全部播完（共 ' + pages.length + ' 页）');
         whiteFade.style.transition = 'none';
         whiteFade.style.opacity = '0';
+        view.style.transition = 'none';
+        view.style.opacity = '1';
         view.removeAttribute('src');
         return;
       }}
       setBar('第 ' + (i + 1) + ' / ' + pages.length + ' 页（约 ' + durs[i].toFixed(2) + 's）');
       view.onload = function () {{
-        whiteFade.style.transition = 'none';
-        whiteFade.style.opacity = '0';
+        if (TRANSITION_KIND === 'inner_text_fade') {{
+          whiteFade.style.display = 'none';
+          view.style.transition = 'none';
+          view.style.opacity = '1';
+          pendingAfterFadeIn = function () {{
+            var ms = Math.max(100, Math.round(durs[i] * 1000));
+            timer = setTimeout(function () {{
+              timer = null;
+              if (i + 1 >= pages.length) {{
+                show(i + 1);
+                return;
+              }}
+              pendingAfterFadeOut = function () {{ show(i + 1); }};
+              clearBridgeFailSafe();
+              bridgeFailSafe = setTimeout(function () {{
+                bridgeFailSafe = null;
+                if (pendingAfterFadeOut) {{
+                  var fn = pendingAfterFadeOut;
+                  pendingAfterFadeOut = null;
+                  fn();
+                }}
+              }}, FADE_MS + 300);
+              if (!postStoryBridge('fadeOut')) {{
+                clearBridgeFailSafe();
+                pendingAfterFadeOut = null;
+                show(i + 1);
+              }}
+            }}, ms);
+          }};
+          clearBridgeFailSafe();
+          bridgeFailSafe = setTimeout(function () {{
+            bridgeFailSafe = null;
+            if (pendingAfterFadeIn) {{
+              var g = pendingAfterFadeIn;
+              pendingAfterFadeIn = null;
+              g();
+            }}
+          }}, FADE_MS + 300);
+          if (!postStoryBridge('fadeIn', {{ pageIndex: i }})) {{
+            clearBridgeFailSafe();
+            if (pendingAfterFadeIn) {{
+              var g2 = pendingAfterFadeIn;
+              pendingAfterFadeIn = null;
+              g2();
+            }}
+          }}
+          return;
+        }} else if (TRANSITION_KIND === 'iframe_crossfade') {{
+          whiteFade.style.display = 'none';
+          if (i === 0) {{
+            view.style.transition = 'none';
+            view.style.opacity = '1';
+          }} else {{
+            view.style.transition = 'opacity ' + FADE_CSS + ' ease-in-out';
+            void view.offsetWidth;
+            view.style.opacity = '1';
+          }}
+        }} else {{
+          whiteFade.style.display = '';
+          whiteFade.style.transition = 'none';
+          whiteFade.style.opacity = '0';
+        }}
         const ms = Math.max(100, Math.round(durs[i] * 1000));
         timer = setTimeout(function () {{
           timer = null;
@@ -1143,9 +1371,15 @@ def _build_index_html(
             show(i + 1);
             return;
           }}
-          whiteFade.style.transition = 'opacity ' + FADE_CSS + ' ease-out';
-          void whiteFade.offsetWidth;
-          whiteFade.style.opacity = '1';
+          if (TRANSITION_KIND === 'iframe_crossfade') {{
+            view.style.transition = 'opacity ' + FADE_CSS + ' ease-in-out';
+            void view.offsetWidth;
+            view.style.opacity = '0';
+          }} else {{
+            whiteFade.style.transition = 'opacity ' + FADE_CSS + ' ease-out';
+            void whiteFade.offsetWidth;
+            whiteFade.style.opacity = '1';
+          }}
           fadeTimer = setTimeout(function () {{
             fadeTimer = null;
             show(i + 1);
@@ -1155,6 +1389,10 @@ def _build_index_html(
       view.src = pages[i];
     }}
 
+    if (TRANSITION_KIND === 'iframe_crossfade' || TRANSITION_KIND === 'inner_text_fade') {{
+      whiteFade.style.display = 'none';
+      view.style.opacity = '1';
+    }}
     show(0);
   </script>
 </body>

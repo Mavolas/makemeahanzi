@@ -10,6 +10,7 @@
 
 import argparse
 import html
+import json
 import os
 import re
 import shutil
@@ -19,6 +20,82 @@ from urllib.parse import quote
 from typing import Optional
 
 from backgrounds import pick_random_canvas_background
+
+# 与 generate_story_from_txt index 方式2 约定一致；父页 postMessage 须同此 id
+STORY_INDEX_BRIDGE_ID = "makemeahanzi-story-index-v1"
+
+
+def _story_index_bridge_script() -> str:
+    """子页监听 postMessage，在页内改 .phrase / #handOverlay 的 opacity（无需父页读 contentDocument）。"""
+    br = json.dumps(STORY_INDEX_BRIDGE_ID)
+    return f"""<script>
+(function () {{
+  var BRIDGE = {br};
+  function phrase() {{
+    return document.querySelector(".canvas .phrase") || document.querySelector(".phrase");
+  }}
+  function hand() {{
+    return document.getElementById("handOverlay");
+  }}
+  function handOp(h) {{
+    if (!h) return 1;
+    var m = (h.getAttribute("style") || "").match(/opacity\\s*:\\s*([\\d.]+)/i);
+    return m ? parseFloat(m[1]) : 1;
+  }}
+  window.addEventListener("message", function (ev) {{
+    var d = ev.data;
+    if (!d || d.storyBridge !== BRIDGE) return;
+    var css = d.fadeCss || "1s";
+    var ms = Math.max(1, parseInt(d.fadeMs, 10) || 1000);
+    if (d.cmd === "fadeOut") {{
+      var ph = phrase(), h = hand();
+      if (!ph) {{
+        window.parent.postMessage({{ storyBridge: BRIDGE, cmd: "fadeOutDone" }}, "*");
+        return;
+      }}
+      ph.style.transition = "opacity " + css + " ease-in-out";
+      void ph.offsetWidth;
+      ph.style.opacity = "0";
+      if (h) {{
+        h.style.transition = "opacity " + css + " ease-in-out";
+        h.style.opacity = "0";
+      }}
+      setTimeout(function () {{
+        window.parent.postMessage({{ storyBridge: BRIDGE, cmd: "fadeOutDone" }}, "*");
+      }}, ms);
+    }}
+    if (d.cmd === "fadeIn") {{
+      var ph = phrase(), h = hand(), pi = d.pageIndex | 0;
+      if (!ph) {{
+        window.parent.postMessage({{ storyBridge: BRIDGE, cmd: "fadeInDone" }}, "*");
+        return;
+      }}
+      if (pi === 0) {{
+        ph.style.transition = "none";
+        ph.style.opacity = "1";
+        window.parent.postMessage({{ storyBridge: BRIDGE, cmd: "fadeInDone" }}, "*");
+        return;
+      }}
+      ph.style.transition = "none";
+      ph.style.opacity = "0";
+      void ph.offsetWidth;
+      ph.style.transition = "opacity " + css + " ease-in-out";
+      ph.style.opacity = "1";
+      if (h) {{
+        var hb = handOp(h);
+        h.style.transition = "none";
+        h.style.opacity = "0";
+        void h.offsetWidth;
+        h.style.transition = "opacity " + css + " ease-in-out";
+        h.style.opacity = String(hb);
+      }}
+      setTimeout(function () {{
+        window.parent.postMessage({{ storyBridge: BRIDGE, cmd: "fadeInDone" }}, "*");
+      }}, ms);
+    }}
+  }});
+}})();
+</script>"""
 
 
 def resolve_hand_image_path(hand_image: str, repo_root: Path) -> Optional[Path]:
@@ -740,8 +817,9 @@ def build_html(
     canvas_bg: str = "#d6e9f8",
     line_gap_px: int = 24,
     canvas_bg_image: Optional[str] = None,
+    story_index_bridge: bool = False,
 ) -> str:
-    # 固定画布 + 底色（及可选背景图 cover 铺满）；两行字在画布内水平、垂直居中
+    # 固定画布：底色/背景图在 .canvas-backdrop，.phrase 叠在上层（story index 方式2 仅淡出 .phrase 时背景不动）
     safe_title = html.escape(out_title)
     safe_bg = html.escape(canvas_bg)
     if canvas_bg_image:
@@ -754,6 +832,7 @@ def build_html(
       background-repeat: no-repeat;"""
     else:
         canvas_bg_css = f"background: {safe_bg};"
+    bridge_html = _story_index_bridge_script() if story_index_bridge else ""
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -771,17 +850,27 @@ def build_html(
       font-family: system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     }}
     .canvas {{
+      position: relative;
       width: {canvas_width}px;
       height: {canvas_height}px;
-      {canvas_bg_css}
       box-sizing: border-box;
       padding: 16px;
       display: flex;
       align-items: center;
       justify-content: center;
       overflow: hidden;
+      background: transparent;
+    }}
+    .canvas-backdrop {{
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      {canvas_bg_css}
     }}
     .phrase {{
+      position: relative;
+      z-index: 1;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
@@ -813,11 +902,13 @@ def build_html(
 </head>
 <body>
   <div class="canvas">
+    <div class="canvas-backdrop" aria-hidden="true"></div>
     <div class="phrase">
       {''.join(pieces_html)}
     </div>
   </div>
   {hand_js}
+  {bridge_html}
 </body>
 </html>
 """
@@ -865,6 +956,11 @@ def main() -> None:
         default=None,
         metavar="FILE",
         help="与输出 HTML 同目录下的背景图文件名；CSS background-size:cover 铺满画布（过小会等比放大）；通常由 story 脚本复制素材后传入",
+    )
+    parser.add_argument(
+        "--story-index-bridge",
+        action="store_true",
+        help="注入 postMessage 桥接脚本，供 generate_story index 方式2 在子页内淡出文字（file:// 下父页无法读 iframe 文档时必需）",
     )
     parser.add_argument("--start-delay", type=float, default=0.0, help="第一个字的起始延迟（秒）")
     parser.add_argument(
@@ -1164,6 +1260,7 @@ def main() -> None:
         canvas_bg=canvas_bg,
         line_gap_px=args.line_gap_px,
         canvas_bg_image=args.canvas_bg_image,
+        story_index_bridge=bool(args.story_index_bridge),
     )
 
     with open(out_path, "w", encoding="utf-8") as f:
