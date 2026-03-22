@@ -3,7 +3,8 @@
 """
 从纯文本文案生成「多页」手写动画，每页两行（跳过空行），每页调用 generate_animated_text.py，
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
-未在「--」后指定 --canvas-bg 时，整套 story 共用随机淡色背景（每页相同）；指定 --canvas-bg 则全 story 用该色。
+未在「--」后指定 --canvas-bg 时，整套 story 共用随机淡色背景（每页相同，与 backgrounds.py 一致）；指定 --canvas-bg 则全 story 用该色。
+index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡入到透明，逻辑与原先白幕相同）。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
 再只问一次「每个文稿统一生成多少套」。
@@ -20,11 +21,13 @@
   python3 generate_story_from_txt.py --wenan-dir 我的文案夹
 
 「--」 后面的参数会原样传给 generate_animated_text.py。
+未写 --stroke-draw-ratio 时，story 会默认注入 1.0（笔画全程等粗）；若需细→粗变化可在「--」后自行传该参数覆盖。
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -48,6 +51,44 @@ def _gen_extra_has_canvas_bg(extra: list[str]) -> bool:
         if tok.startswith("--canvas-bg=") and len(tok) > len("--canvas-bg="):
             return True
     return False
+
+
+def _gen_extra_has_stroke_draw_ratio(extra: list[str]) -> bool:
+    """是否已指定笔画粗细动画比例（--stroke-draw-ratio）。"""
+    for tok in extra:
+        if tok == "--stroke-draw-ratio":
+            return True
+        if tok.startswith("--stroke-draw-ratio="):
+            return True
+    return False
+
+
+def _looks_like_hex_color(s: str) -> bool:
+    t = s.strip()
+    if t.startswith("#"):
+        t = t[1:]
+    return bool(t) and len(t) in (3, 6) and all(
+        c in "0123456789abcdefABCDEF" for c in t
+    )
+
+
+def parse_canvas_bg_hex_from_gen_extra(extra: list[str]) -> str | None:
+    """从 gen_extra / effective_extra 解析 --canvas-bg，返回如 #RRGGBB。"""
+    i = 0
+    while i < len(extra):
+        tok = extra[i]
+        if tok == "--canvas-bg" and i + 1 < len(extra):
+            raw = extra[i + 1].strip()
+            if _looks_like_hex_color(raw):
+                return raw if raw.startswith("#") else f"#{raw}"
+            return None
+        if tok.startswith("--canvas-bg="):
+            raw = tok.split("=", 1)[1].strip()
+            if _looks_like_hex_color(raw):
+                return raw if raw.startswith("#") else f"#{raw}"
+            return None
+        i += 1
+    return None
 
 
 def _default_output_root() -> Path:
@@ -293,10 +334,17 @@ def generate_one_story(
     durations: list[float] = []
 
     effective_extra = list(gen_extra)
+    if not _gen_extra_has_stroke_draw_ratio(effective_extra):
+        # 与 generate_animated_text 默认一致：全程等粗，避免 story 批量时仍见细线/粗线混杂
+        effective_extra = ["--stroke-draw-ratio", "1.0", *effective_extra]
     if not _gen_extra_has_canvas_bg(effective_extra):
         story_bg = pick_random_canvas_background()
         effective_extra = ["--canvas-bg", story_bg.hex, *effective_extra]
         print(f"    本套 story 统一画布：{story_bg.name} {story_bg.hex}")
+
+    story_canvas_bg = parse_canvas_bg_hex_from_gen_extra(effective_extra)
+    if not story_canvas_bg:
+        story_canvas_bg = "#e8e8e8"
 
     for idx, phrase in enumerate(pages, start=1):
         name = f"page_{idx:03d}.html"
@@ -340,6 +388,7 @@ def generate_one_story(
         "total_content_sec": round(total_content, 3),
         "total_with_fade_sec": round(total_with_fade, 3),
         "fade_out_seconds": _FADE_OUT_SECONDS,
+        "story_canvas_bg": story_canvas_bg,
         "highlight_keyword": kw or None,
         "highlight_first_page_1based": (hi_page0 + 1) if hi_page0 is not None else None,
         "highlight_mid_timeline_sec": round(hi_mid_sec, 3)
@@ -354,7 +403,12 @@ def generate_one_story(
 
     index_html = out_dir / "index.html"
     index_html.write_text(
-        _build_index_html(page_files, durations, fade_out_seconds=_FADE_OUT_SECONDS),
+        _build_index_html(
+            page_files,
+            durations,
+            fade_out_seconds=_FADE_OUT_SECONDS,
+            stage_background=story_canvas_bg,
+        ),
         encoding="utf-8",
     )
 
@@ -666,11 +720,13 @@ def _build_index_html(
     durations: list[float],
     *,
     fade_out_seconds: float = _FADE_OUT_SECONDS,
+    stage_background: str = "#ffffff",
 ) -> str:
     pages_json = json.dumps(pages, ensure_ascii=False)
     durs_json = json.dumps(durations)
     fade_ms = max(1, int(round(fade_out_seconds * 1000)))
     fade_css_js = json.dumps(f"{fade_out_seconds:g}s")
+    safe_stage_bg = html.escape(stage_background)
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -682,13 +738,13 @@ def _build_index_html(
       margin: 0;
       height: 100%;
       overflow: hidden;
-      background: #fff;
+      background: {safe_stage_bg};
     }}
     #stage {{
       position: relative;
       width: 100%;
       height: 100%;
-      background: #fff;
+      background: {safe_stage_bg};
     }}
     #view {{
       width: 100%;
@@ -699,7 +755,7 @@ def _build_index_html(
     #whiteFade {{
       position: absolute;
       inset: 0;
-      background: #fff;
+      background: {safe_stage_bg};
       opacity: 0;
       pointer-events: none;
     }}

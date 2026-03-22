@@ -56,7 +56,7 @@ _SVG_GRID_GROUP_RE = re.compile(
     re.IGNORECASE,
 )
 _SVG_LIGHTGRAY_PATH_RE = re.compile(
-    r'\s*<path[^>]*fill="lightgray"[^>]*>\s*</path>\s*',
+    r'\s*<path\b[^>]*\bfill\s*=\s*["\']lightgray["\'][^>]*(?:/>|>\s*</path>)\s*',
     re.IGNORECASE,
 )
 
@@ -71,6 +71,149 @@ def strip_svgs_preview_guides(svg_text: str) -> str:
 def normalize_stroke_color_black(svg_text: str) -> str:
     """原 SVG 动画 keyframes 里用蓝色描边书写过程，统一改为黑色。"""
     return re.sub(r"stroke:\s*blue\s*;", "stroke: black;", svg_text, flags=re.IGNORECASE)
+
+
+_STYLE_STROKE_WIDTH_DECL_RE = re.compile(
+    r"stroke-width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*;",
+    re.IGNORECASE,
+)
+
+
+def _fmt_stroke_width_num(n: float) -> str:
+    s = f"{n:.4f}".rstrip("0").rstrip(".")
+    if s in ("", "-0"):
+        s = "0"
+    return s
+
+
+def _rescale_stroke_widths_in_css_chunk(
+    chunk: str, *, target_peak_user: float, draw_ratio: float
+) -> str:
+    """
+    将 chunk 内所有 stroke-width 从 [lo, hi] 线性映射到
+    [target_peak_user * draw_ratio, target_peak_user]。
+    draw_ratio=1 时全程等粗（仅 stroke-dashoffset 表现书写），解决同屏「有的笔画细灰、有的粗黑」。
+    draw_ratio 越小书写过程越细；0.125 接近 MMH 原始 128/1024。
+    """
+    nums = [float(mm.group(1)) for mm in _STYLE_STROKE_WIDTH_DECL_RE.finditer(chunk)]
+    if not nums:
+        return chunk
+    lo = min(nums)
+    hi = max(nums)
+    if hi <= 0:
+        return chunk
+    dr = max(0.0, min(1.0, draw_ratio))
+    new_lo = target_peak_user * dr
+    if abs(hi - lo) < 1e-9:
+        def repl_flat(m: re.Match[str]) -> str:
+            return f"stroke-width: {_fmt_stroke_width_num(target_peak_user)};"
+
+        return _STYLE_STROKE_WIDTH_DECL_RE.sub(repl_flat, chunk)
+    scale = (target_peak_user - new_lo) / (hi - lo)
+
+    def repl(m: re.Match[str]) -> str:
+        v = float(m.group(1))
+        nv = new_lo + (v - lo) * scale
+        return f"stroke-width: {_fmt_stroke_width_num(nv)};"
+
+    return _STYLE_STROKE_WIDTH_DECL_RE.sub(repl, chunk)
+
+
+def _rewrite_style_body_keyframes(
+    style_body: str, *, target_peak_user: float, draw_ratio: float
+) -> str:
+    """按 @keyframes 块分段，分别统一块内线宽范围。"""
+    i = 0
+    parts: list[str] = []
+    while i < len(style_body):
+        m = re.search(r"@keyframes\b", style_body[i:], re.IGNORECASE)
+        if not m:
+            parts.append(style_body[i:])
+            break
+        parts.append(style_body[i : i + m.start()])
+        j = i + m.start()
+        brace_open = style_body.find("{", j)
+        if brace_open == -1:
+            parts.append(style_body[j:])
+            break
+        depth = 0
+        k = brace_open
+        while k < len(style_body):
+            ch = style_body[k]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    inner = style_body[brace_open + 1 : k]
+                    inner2 = _rescale_stroke_widths_in_css_chunk(
+                        inner,
+                        target_peak_user=target_peak_user,
+                        draw_ratio=draw_ratio,
+                    )
+                    parts.append(style_body[j : brace_open + 1] + inner2 + "}")
+                    i = k + 1
+                    break
+            k += 1
+        else:
+            parts.append(style_body[j:])
+            break
+    return "".join(parts)
+
+
+def _flatten_all_stroke_widths_in_style_body(
+    body: str, target_peak_user: float
+) -> str:
+    """无视 keyframes 结构，把 style 内每一处 stroke-width 都改成同一值（最彻底等粗）。"""
+
+    def repl(m: re.Match[str]) -> str:
+        return f"stroke-width: {_fmt_stroke_width_num(target_peak_user)};"
+
+    return _STYLE_STROKE_WIDTH_DECL_RE.sub(repl, body)
+
+
+def scale_stylesheet_stroke_width_to_screen_px(
+    svg_text: str,
+    *,
+    stroke_width_px: float,
+    char_size: int,
+    stroke_draw_ratio: float = 1.0,
+) -> str:
+    """
+    MMH 的 stroke-width 写在 @keyframes 里（常见书写 128、收笔 1024）。
+    target_peak_user = stroke_width_px * 1024 / char_size，使线宽约等于 stroke_width_px（px）。
+    每个 @keyframes 内映射 stroke-width；默认 stroke_draw_ratio=1 为全程等粗。
+    stroke_width_px <= 0 时不修改。
+    """
+    if stroke_width_px <= 0 or char_size <= 0:
+        return svg_text
+    target_peak_user = stroke_width_px * 1024.0 / char_size
+
+    def repl_style_block(m: re.Match[str]) -> str:
+        attrs, body = m.group(1), m.group(2)
+        # draw_ratio≈1：整段 style 内所有 stroke-width 强制同一数值，避免分段解析遗漏导致仍有细线
+        if stroke_draw_ratio >= 0.999:
+            new_body = _flatten_all_stroke_widths_in_style_body(body, target_peak_user)
+        elif re.search(r"@keyframes\b", body, re.IGNORECASE):
+            new_body = _rewrite_style_body_keyframes(
+                body,
+                target_peak_user=target_peak_user,
+                draw_ratio=stroke_draw_ratio,
+            )
+        else:
+            new_body = _rescale_stroke_widths_in_css_chunk(
+                body,
+                target_peak_user=target_peak_user,
+                draw_ratio=stroke_draw_ratio,
+            )
+        return f"<style{attrs}>{new_body}</style>"
+
+    return re.sub(
+        r"<style([^>]*)>([\s\S]*?)</style>",
+        repl_style_block,
+        svg_text,
+        flags=re.IGNORECASE,
+    )
 
 
 def load_char_svg(svg_dir: str, ch: str) -> Optional[str]:
@@ -609,6 +752,20 @@ def main() -> None:
     parser.add_argument("--out", default="phrase.html", help="输出 HTML 文件路径")
     parser.add_argument("--svg-dir", default="svgs", help="动画 SVG 目录（默认：svgs）")
     parser.add_argument("--char-size", type=int, default=150, help="每个字显示尺寸（px）")
+    parser.add_argument(
+        "--stroke-width-px",
+        type=float,
+        default=7.0,
+        metavar="PX",
+        help="笔画线宽（约等于屏幕像素），按 viewBox 与 --char-size 换算后写入 SVG 动画；≤0 保留源 SVG 线宽",
+    )
+    parser.add_argument(
+        "--stroke-draw-ratio",
+        type=float,
+        default=1.0,
+        metavar="R",
+        help="每个笔画动画内：书写最细相对写完最粗的比例（0～1）。1=全程等粗（推荐，避免细灰/粗黑混杂）；0.5～0.65 略有粗细变化；0.125≈MMH 原始 128/1024",
+    )
     parser.add_argument("--gap-px", type=int, default=10, help="字与字之间间距（px）")
     parser.add_argument("--line-gap-px", type=int, default=48, help="两行之间的垂直间距（px）")
     parser.add_argument("--canvas-width", type=int, default=1054, help="固定背景画布宽度（px）")
@@ -712,6 +869,12 @@ def main() -> None:
 
         svg_text = strip_svgs_preview_guides(svg_text)
         svg_text = normalize_stroke_color_black(svg_text)
+        svg_text = scale_stylesheet_stroke_width_to_screen_px(
+            svg_text,
+            stroke_width_px=args.stroke_width_px,
+            char_size=args.char_size,
+            stroke_draw_ratio=args.stroke_draw_ratio,
+        )
 
         prefix = f"c{i}_"
         svg_text = namespace_svg(svg_text, prefix=prefix)
