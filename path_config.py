@@ -8,6 +8,10 @@
 # 剪辑工作流根目录（王者素材、中间文本、音乐、书籍素材、背景文本等均在其子目录下）
 BASE_DIR = r"E:\剪辑工作流"
 
-# generate_story_from_txt 默认输出根目录 = BASE_DIR / 下列子目录（其下再建 文案名_01 等）
+# generate_story_from_txt 默认输出根目录 = BASE_DIR / 下列子目录
 STORY_OUTPUT_SUBDIR = "中间文本"
+
+# 其下：HTML 等生成物在「{安全文件名}{STORY_DRAFT_SUFFIX}」；导出 MP4 在「{安全文件名}{STORY_FINAL_SUFFIX}」
+STORY_DRAFT_SUFFIX = "_草稿"
+STORY_FINAL_SUFFIX = "_成稿"
 

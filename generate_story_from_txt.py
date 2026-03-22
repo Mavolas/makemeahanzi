@@ -5,7 +5,10 @@
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
-再只问一次「每个文稿统一生成多少套」；每套输出到独立子目录（默认 path_config.BASE_DIR/中间文本/文件名_01/）。
+再只问一次「每个文稿统一生成多少套」。
+默认目录结构（在 path_config.BASE_DIR/中间文本/ 下）：
+  · HTML：{文案名}_草稿/（多套时其下再有 {文案名}_01、_02 …）
+  · MP4：{文案名}_成稿/，文件名带套数且冲突时自动加后缀，避免覆盖。
 
 用法示例：
   python3 generate_story_from_txt.py
@@ -99,6 +102,34 @@ def _safe_output_stem(txt_path: Path) -> str:
     stem = stem.strip() or "story"
     stem = re.sub(r"\s+", "_", stem)
     return stem
+
+
+def _story_suffixes() -> tuple[str, str]:
+    try:
+        from path_config import STORY_DRAFT_SUFFIX, STORY_FINAL_SUFFIX
+
+        return str(STORY_DRAFT_SUFFIX), str(STORY_FINAL_SUFFIX)
+    except Exception:
+        return "_草稿", "_成稿"
+
+
+def _allocate_mp4_path(final_dir: Path, stem: str, run_k: int, n_runs: int) -> Path:
+    """成稿目录下分配不冲突的 mp4 路径。"""
+    final_dir.mkdir(parents=True, exist_ok=True)
+    if n_runs > 1:
+        root = final_dir / f"{stem}_{run_k:02d}.mp4"
+    else:
+        root = final_dir / f"{stem}.mp4"
+    if not root.exists():
+        return root
+    for i in range(2, 10000):
+        if n_runs > 1:
+            p = final_dir / f"{stem}_{run_k:02d}_{i}.mp4"
+        else:
+            p = final_dir / f"{stem}_{i}.mp4"
+        if not p.exists():
+            return p
+    raise SystemExit("无法生成不冲突的 MP4 文件名")
 
 
 def _preview_txt(path: Path) -> tuple[str, list[str], list[str]]:
@@ -359,10 +390,21 @@ def main() -> None:
         txt_path = Path(args.txt_path).expanduser().resolve()
         if not txt_path.is_file():
             raise SystemExit(f"找不到文案文件：{txt_path}")
-        mp4_single = Path(args.mp4_out).expanduser() if args.mp4_out else None
+        stem = _safe_output_stem(txt_path)
+        draft_sfx, final_sfx = _story_suffixes()
+        draft_root = base_out / f"{stem}{draft_sfx}"
+        final_root = base_out / f"{stem}{final_sfx}"
+        html_out = draft_root
+        if export_mp4:
+            if args.mp4_out:
+                mp4_single = Path(args.mp4_out).expanduser().resolve()
+            else:
+                mp4_single = _allocate_mp4_path(final_root, stem, 1, 1)
+        else:
+            mp4_single = None
         generate_one_story(
             txt_path=txt_path,
-            out_dir=base_out,
+            out_dir=html_out,
             page_padding=args.page_padding,
             gen_extra=gen_extra,
             repo_root=repo_root,
@@ -372,7 +414,7 @@ def main() -> None:
             mp4_height=args.mp4_height,
             mp4_show_bar=args.mp4_show_bar,
         )
-        print(f"打开连续播放：{base_out / 'index.html'}")
+        print(f"打开连续播放：{html_out / 'index.html'}")
         return
 
     wenan_dir = (repo_root / args.wenan_dir).resolve()
@@ -384,7 +426,10 @@ def main() -> None:
         )
 
     if args.mp4_out:
-        print("提示：wenan 批量忽略 --mp4-out，每套为子目录内 story.mp4", file=sys.stderr)
+        print(
+            "提示：wenan 批量忽略 --mp4-out，MP4 写入各文案的「_成稿」目录",
+            file=sys.stderr,
+        )
 
     interactive = sys.stdin.isatty()
     print(f"wenan 批量：{len(txt_files)} 个 txt，输出根目录 {base_out}")
@@ -415,14 +460,26 @@ def main() -> None:
 
     print(f"\n每个文稿 {n} 套，{len(nonempty)} 个文稿 → 最多 {len(nonempty) * n} 套。\n")
 
+    draft_sfx, final_sfx = _story_suffixes()
     total_jobs = 0
     for txt_path in nonempty:
         stem = _safe_output_stem(txt_path)
+        draft_root = base_out / f"{stem}{draft_sfx}"
+        final_root = base_out / f"{stem}{final_sfx}"
         for k in range(1, n + 1):
-            sub = f"{stem}_{k:02d}" if n > 1 else stem
-            out_dir = base_out / sub
+            if n > 1:
+                out_dir = draft_root / f"{stem}_{k:02d}"
+            else:
+                out_dir = draft_root
+            mp4_target = (
+                _allocate_mp4_path(final_root, stem, k, n)
+                if export_mp4
+                else None
+            )
             total_jobs += 1
             print(f"\n>>> [{total_jobs}] {txt_path.name} 第 {k}/{n} 套 → {out_dir}")
+            if export_mp4:
+                print(f"    MP4 → {mp4_target}")
             try:
                 generate_one_story(
                     txt_path=txt_path,
@@ -431,7 +488,7 @@ def main() -> None:
                     gen_extra=gen_extra,
                     repo_root=repo_root,
                     export_mp4=export_mp4,
-                    mp4_out=None,
+                    mp4_out=mp4_target,
                     mp4_width=args.mp4_width,
                     mp4_height=args.mp4_height,
                     mp4_show_bar=args.mp4_show_bar,
