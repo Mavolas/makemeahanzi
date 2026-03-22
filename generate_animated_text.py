@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from urllib.parse import quote
 from typing import Optional
 
 from backgrounds import pick_random_canvas_background
@@ -738,10 +739,21 @@ def build_html(
     canvas_height: int = 588,
     canvas_bg: str = "#d6e9f8",
     line_gap_px: int = 24,
+    canvas_bg_image: Optional[str] = None,
 ) -> str:
-    # 固定画布 + 淡蓝背景；两行字在画布内水平、垂直居中
+    # 固定画布 + 底色（及可选背景图 cover 铺满）；两行字在画布内水平、垂直居中
     safe_title = html.escape(out_title)
     safe_bg = html.escape(canvas_bg)
+    if canvas_bg_image:
+        # url() 内对中文/空格等编码；文件与 HTML 同目录时用文件名即可
+        safe_img_url = quote(canvas_bg_image, safe="")
+        canvas_bg_css = f"""background-color: {safe_bg};
+      background-image: url(\"{safe_img_url}\");
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;"""
+    else:
+        canvas_bg_css = f"background: {safe_bg};"
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -761,7 +773,7 @@ def build_html(
     .canvas {{
       width: {canvas_width}px;
       height: {canvas_height}px;
-      background: {safe_bg};
+      {canvas_bg_css}
       box-sizing: border-box;
       padding: 16px;
       display: flex;
@@ -846,7 +858,13 @@ def main() -> None:
         "--canvas-bg",
         default=None,
         metavar="HEX",
-        help="画布背景色（如 #d6e9f8）；省略则每次从 backgrounds 随机淡色",
+        help="画布背景色（如 #d6e9f8）；省略则每次从 backgrounds 随机淡色；与背景图并存时为底色",
+    )
+    parser.add_argument(
+        "--canvas-bg-image",
+        default=None,
+        metavar="FILE",
+        help="与输出 HTML 同目录下的背景图文件名；CSS background-size:cover 铺满画布（过小会等比放大）；通常由 story 脚本复制素材后传入",
     )
     parser.add_argument("--start-delay", type=float, default=0.0, help="第一个字的起始延迟（秒）")
     parser.add_argument(
@@ -1127,7 +1145,12 @@ def main() -> None:
     else:
         _picked = pick_random_canvas_background()
         canvas_bg = _picked.hex
-        print(f"画布背景（随机）：{_picked.name} {_picked.hex}")
+        if args.canvas_bg_image:
+            print(
+                f"画布底色素（随机）：{_picked.name} {_picked.hex}（背景图 {args.canvas_bg_image}）"
+            )
+        else:
+            print(f"画布背景（随机）：{_picked.name} {_picked.hex}")
 
     html_out = build_html(
         phrase=phrase,
@@ -1140,6 +1163,7 @@ def main() -> None:
         canvas_height=args.canvas_height,
         canvas_bg=canvas_bg,
         line_gap_px=args.line_gap_px,
+        canvas_bg_image=args.canvas_bg_image,
     )
 
     with open(out_path, "w", encoding="utf-8") as f:

@@ -3,7 +3,9 @@
 """
 从纯文本文案生成「多页」手写动画，每页两行（跳过空行），每页调用 generate_animated_text.py，
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
-未在「--」后指定 --canvas-bg 时，整套 story 共用随机淡色背景（每页相同，与 backgrounds.py 一致）；指定 --canvas-bg 则全 story 用该色。
+未在「--」后指定 --canvas-bg / --canvas-bg-image 时：若 path_config.BASE_DIR/中间文本背景 存在且含图片，
+  则以 5:1 权重相对「仅纯色」随机选背景图（CSS cover 铺满，小图等比放大）并配随机淡色底；否则仅随机纯色（与 backgrounds.py 一致）。
+  指定 --canvas-bg 或 --canvas-bg-image 则全 story 按参数，不再走上述逻辑。
 index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡入到透明，逻辑与原先白幕相同）。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
@@ -53,6 +55,63 @@ def _gen_extra_has_canvas_bg(extra: list[str]) -> bool:
         if tok.startswith("--canvas-bg=") and len(tok) > len("--canvas-bg="):
             return True
     return False
+
+
+def _gen_extra_has_canvas_bg_image(extra: list[str]) -> bool:
+    """是否已指定画布背景图（--canvas-bg-image）。"""
+    for tok in extra:
+        if tok == "--canvas-bg-image":
+            return True
+        if tok.startswith("--canvas-bg-image="):
+            return True
+    return False
+
+
+_STORY_BG_IMAGE_SUFFIXES = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+)
+
+
+def _resolve_story_bg_images_dir() -> Path | None:
+    """path_config.BASE_DIR / STORY_BG_IMAGES_SUBDIR；不可用则 None。"""
+    try:
+        import path_config as pc
+
+        sub = getattr(pc, "STORY_BG_IMAGES_SUBDIR", "中间文本背景")
+        p = (Path(pc.BASE_DIR).expanduser() / sub).resolve()
+        return p if p.is_dir() else None
+    except Exception:
+        return None
+
+
+def _list_story_bg_images(dir_path: Path) -> list[Path]:
+    if not dir_path.is_dir():
+        return []
+    out = [
+        p
+        for p in dir_path.iterdir()
+        if p.is_file() and p.suffix.lower() in _STORY_BG_IMAGE_SUFFIXES
+    ]
+    out.sort(key=lambda p: p.name.lower())
+    return out
+
+
+def _copy_story_bg_image_to_out_dir(src: Path, out_dir: Path) -> str:
+    """复制到 out_dir，若重名则加后缀，返回写入后的文件名。"""
+    dest = out_dir / src.name
+    if not dest.exists():
+        shutil.copy2(src, dest)
+        return dest.name
+    stem, suf = src.stem, src.suffix
+    n = 1
+    while True:
+        cand = out_dir / f"{stem}_bg{n}{suf}"
+        if not cand.exists():
+            shutil.copy2(src, cand)
+            return cand.name
+        n += 1
+        if n > 9999:
+            raise SystemExit("无法为 story 背景图生成不冲突的文件名")
 
 
 def _gen_extra_has_stroke_draw_ratio(extra: list[str]) -> bool:
@@ -370,10 +429,37 @@ def generate_one_story(
                 hand_rel = str(picked)
             effective_extra = ["--hand-image", hand_rel, *effective_extra]
             print(f"    本套 story 随机手形：{hand_rel}")
-    if not _gen_extra_has_canvas_bg(effective_extra):
+    story_bg_image_basename: str | None = None
+    if not _gen_extra_has_canvas_bg(effective_extra) and not _gen_extra_has_canvas_bg_image(
+        effective_extra
+    ):
         story_bg = pick_random_canvas_background()
-        effective_extra = ["--canvas-bg", story_bg.hex, *effective_extra]
-        print(f"    本套 story 统一画布：{story_bg.name} {story_bg.hex}")
+        bg_dir = _resolve_story_bg_images_dir()
+        bg_imgs = _list_story_bg_images(bg_dir) if bg_dir else []
+        # 有图时：背景图权重 5，纯色权重 1
+        pick_image = bool(bg_imgs) and random.randint(1, 6) <= 5
+        if pick_image:
+            src = random.choice(bg_imgs)
+            try:
+                story_bg_image_basename = _copy_story_bg_image_to_out_dir(src, out_dir)
+            except OSError as e:
+                print(f"    警告：复制背景图失败（{e}），改用纯色画布", file=sys.stderr)
+                story_bg_image_basename = None
+        if story_bg_image_basename:
+            effective_extra = [
+                "--canvas-bg",
+                story_bg.hex,
+                "--canvas-bg-image",
+                story_bg_image_basename,
+                *effective_extra,
+            ]
+            print(
+                f"    本套 story 画布：背景图 {story_bg_image_basename}（相对纯色权重 5:1）"
+                f" + 底色 {story_bg.name} {story_bg.hex}"
+            )
+        else:
+            effective_extra = ["--canvas-bg", story_bg.hex, *effective_extra]
+            print(f"    本套 story 统一画布：{story_bg.name} {story_bg.hex}")
 
     story_canvas_bg = parse_canvas_bg_hex_from_gen_extra(effective_extra)
     if not story_canvas_bg:
@@ -422,6 +508,7 @@ def generate_one_story(
         "total_with_fade_sec": round(total_with_fade, 3),
         "fade_out_seconds": _FADE_OUT_SECONDS,
         "story_canvas_bg": story_canvas_bg,
+        "story_background_image": story_bg_image_basename,
         "highlight_keyword": kw or None,
         "highlight_first_page_1based": (hi_page0 + 1) if hi_page0 is not None else None,
         "highlight_mid_timeline_sec": round(hi_mid_sec, 3)
