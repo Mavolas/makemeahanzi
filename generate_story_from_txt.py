@@ -22,6 +22,7 @@ index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡
 
 「--」 后面的参数会原样传给 generate_animated_text.py。
 未写 --stroke-draw-ratio 时，story 会默认注入 1.0（笔画全程等粗）；若需细→粗变化可在「--」后自行传该参数覆盖。
+仓库根下 shouxing/ 内放多个手形 PNG 时，每套 story 随机选一张，全套页共用；「--」里已传 --hand-image 则不随机。
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import argparse
 import html
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -61,6 +63,25 @@ def _gen_extra_has_stroke_draw_ratio(extra: list[str]) -> bool:
         if tok.startswith("--stroke-draw-ratio="):
             return True
     return False
+
+
+def _gen_extra_has_hand_image(extra: list[str]) -> bool:
+    """是否已指定手形图（--hand-image）。"""
+    for tok in extra:
+        if tok == "--hand-image":
+            return True
+        if tok.startswith("--hand-image="):
+            return True
+    return False
+
+
+def _list_shouxing_pngs(dir_path: Path) -> list[Path]:
+    """列出目录内全部 .png（不递归），按文件名排序后供随机抽取。"""
+    if not dir_path.is_dir():
+        return []
+    out = [p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() == ".png"]
+    out.sort(key=lambda p: p.name.lower())
+    return out
 
 
 def _looks_like_hex_color(s: str) -> bool:
@@ -317,6 +338,7 @@ def generate_one_story(
     mp4_width: str | None,
     mp4_height: str | None,
     mp4_show_bar: bool,
+    shouxing_dir: str = "shouxing",
 ) -> None:
     lines = load_non_empty_lines(txt_path)
     if not lines:
@@ -337,6 +359,17 @@ def generate_one_story(
     if not _gen_extra_has_stroke_draw_ratio(effective_extra):
         # 与 generate_animated_text 默认一致：全程等粗，避免 story 批量时仍见细线/粗线混杂
         effective_extra = ["--stroke-draw-ratio", "1.0", *effective_extra]
+    if not _gen_extra_has_hand_image(effective_extra):
+        sx_root = (repo_root / shouxing_dir).resolve()
+        sx_pngs = _list_shouxing_pngs(sx_root)
+        if sx_pngs:
+            picked = random.choice(sx_pngs)
+            try:
+                hand_rel = picked.relative_to(repo_root).as_posix()
+            except ValueError:
+                hand_rel = str(picked)
+            effective_extra = ["--hand-image", hand_rel, *effective_extra]
+            print(f"    本套 story 随机手形：{hand_rel}")
     if not _gen_extra_has_canvas_bg(effective_extra):
         story_bg = pick_random_canvas_background()
         effective_extra = ["--canvas-bg", story_bg.hex, *effective_extra]
@@ -560,6 +593,12 @@ def main() -> None:
         help="文件名中「分+秒」之后的固定段，默认 13",
     )
     parser.add_argument(
+        "--shouxing-dir",
+        default="shouxing",
+        metavar="DIR",
+        help="手形 PNG 目录（相对仓库根）；每套 story 随机选一张，全套页共用；目录不存在或无 png 则用子脚本默认手形；「--」里传 --hand-image 时不随机",
+    )
+    parser.add_argument(
         "gen_args",
         nargs=argparse.REMAINDER,
         help="传给 generate_animated_text.py（前请加 --）",
@@ -623,6 +662,7 @@ def main() -> None:
             mp4_width=args.mp4_width,
             mp4_height=args.mp4_height,
             mp4_show_bar=args.mp4_show_bar,
+            shouxing_dir=args.shouxing_dir,
         )
         print(f"打开连续播放：{html_out / 'index.html'}")
         return
@@ -708,6 +748,7 @@ def main() -> None:
                     mp4_width=args.mp4_width,
                     mp4_height=args.mp4_height,
                     mp4_show_bar=args.mp4_show_bar,
+                    shouxing_dir=args.shouxing_dir,
                 )
             except subprocess.CalledProcessError as e:
                 raise SystemExit(f"子进程失败（退出码 {e.returncode}）") from e
