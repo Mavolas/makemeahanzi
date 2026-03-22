@@ -14,6 +14,7 @@ index.html 页间过渡层与舞台底色与该画布色一致（由不透明淡
   · HTML：{文案名}_草稿/（多套时其下再有 {文案名}_01、_02 …）
   · MP4：{文案名}_成稿/；默认按「橱窗」首次出现页在该页时长中点时的累计时刻命名（含页间淡出），
     如 文案13_惊天反击-03+40+13 (1).mp4；冲突自动 (2)(3)…；可用 --no-story-mp4-time-keyword 恢复旧命名。
+  wenan 批量且需导出多个 MP4 时，默认最多 2 路并行调用 Node/Playwright 导出（可用 --mp4-export-workers 调整；1 为顺序）。
 
 用法示例：
   python3 generate_story_from_txt.py
@@ -38,7 +39,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from generate_animated_text import estimate_phrase_html_duration_seconds
@@ -210,6 +213,87 @@ def resolve_ffmpeg_for_mp4_export() -> str | None:
     return None
 
 
+def _preflight_mp4_export_environment(repo_root: Path) -> None:
+    """批量并行导出前一次性检查 export 脚本、node、ffmpeg。"""
+    export_js = repo_root / "export_mp4_from_html.js"
+    if not export_js.is_file():
+        raise SystemExit(f"自动导出需要存在 {export_js}")
+    if not shutil.which("node"):
+        raise SystemExit("未在 PATH 中找到 node（可加 --no-export-mp4 跳过）")
+    ff = resolve_ffmpeg_for_mp4_export()
+    if not ff:
+        raise SystemExit(
+            "导出 MP4 需要带 libx264 的 ffmpeg。可执行：brew install ffmpeg，"
+            "或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
+        )
+
+
+def run_story_mp4_export(
+    *,
+    repo_root: Path,
+    story_dir: Path,
+    mp4_path: Path,
+    mp4_width: str | None,
+    mp4_height: str | None,
+    mp4_show_bar: bool,
+    label: str = "",
+    print_lock: threading.Lock | None = None,
+) -> None:
+    """调用 export_mp4_from_html.js 导出单个 story 目录为 MP4（可供线程池并发调用）。"""
+    export_js = repo_root / "export_mp4_from_html.js"
+    node = shutil.which("node")
+    if not node or not export_js.is_file():
+        raise RuntimeError("缺少 node 或 export_mp4_from_html.js")
+    ff = resolve_ffmpeg_for_mp4_export()
+    if not ff:
+        raise RuntimeError("未找到 ffmpeg（含 FFMPEG_PATH / PATH）")
+    mp4_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        node,
+        str(export_js),
+        "--story",
+        str(story_dir),
+        "--out",
+        str(mp4_path),
+    ]
+    if mp4_width:
+        cmd.extend(["--width", str(mp4_width)])
+    if mp4_height:
+        cmd.extend(["--height", str(mp4_height)])
+    if not mp4_show_bar:
+        cmd.append("--hide-bar")
+    env = os.environ.copy()
+    env["FFMPEG_PATH"] = ff
+    prefix = f"{label} " if label else ""
+
+    def _emit(msg: str) -> None:
+        if print_lock is not None:
+            with print_lock:
+                print(msg)
+        else:
+            print(msg)
+
+    _emit(f"    {prefix}导出 MP4 …")
+    t0 = time.perf_counter()
+    subprocess.run(cmd, cwd=str(repo_root), check=True, env=env)
+    elapsed = time.perf_counter() - t0
+    size_mb = mp4_path.stat().st_size / (1024 * 1024)
+    _emit(f"    {prefix}MP4：{mp4_path}  ({elapsed:.1f}s, {size_mb:.2f} MiB)")
+
+
+def _run_one_mp4_export_job(job: dict) -> None:
+    run_story_mp4_export(
+        repo_root=job["repo_root"],
+        story_dir=job["story_dir"],
+        mp4_path=job["mp4_path"],
+        mp4_width=job["mp4_width"],
+        mp4_height=job["mp4_height"],
+        mp4_show_bar=job["mp4_show_bar"],
+        label=job["label"],
+        print_lock=job["print_lock"],
+    )
+
+
 def load_non_empty_lines(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -251,21 +335,37 @@ def _story_suffixes() -> tuple[str, str]:
         return "_草稿", "_成稿"
 
 
-def _allocate_mp4_path(final_dir: Path, stem: str, run_k: int, n_runs: int) -> Path:
+def _allocate_mp4_path(
+    final_dir: Path,
+    stem: str,
+    run_k: int,
+    n_runs: int,
+    *,
+    reserved_paths: set[str] | None = None,
+) -> Path:
     """成稿目录下分配不冲突的 mp4 路径（未启用关键词时间命名时）。"""
     final_dir.mkdir(parents=True, exist_ok=True)
+
+    def _free(p: Path) -> bool:
+        key = str(p.resolve())
+        return not p.exists() and (reserved_paths is None or key not in reserved_paths)
+
     if n_runs > 1:
         root = final_dir / f"{stem}_{run_k:02d}.mp4"
     else:
         root = final_dir / f"{stem}.mp4"
-    if not root.exists():
+    if _free(root):
+        if reserved_paths is not None:
+            reserved_paths.add(str(root.resolve()))
         return root
     for i in range(2, 10000):
         if n_runs > 1:
             p = final_dir / f"{stem}_{run_k:02d}_{i}.mp4"
         else:
             p = final_dir / f"{stem}_{i}.mp4"
-        if not p.exists():
+        if _free(p):
+            if reserved_paths is not None:
+                reserved_paths.add(str(p.resolve()))
             return p
     raise SystemExit("无法生成不冲突的 MP4 文件名")
 
@@ -311,17 +411,23 @@ def _allocate_keyword_time_mp4_path(
     mm: str,
     ss: str,
     fixed_suffix: str,
+    *,
+    reserved_paths: set[str] | None = None,
 ) -> Path:
     """
     例：文案13_惊天反击-03+40+13 (1).mp4；同名冲突则 (2)、(3)…
     fixed_suffix 为用户要求的固定段（默认 13）。
+    reserved_paths：延迟并行导出时，已分配给本批其它任务的绝对路径（字符串），避免仅靠 exists() 误判未占用。
     """
     final_dir.mkdir(parents=True, exist_ok=True)
     safe_suffix = fixed_suffix.strip() or _DEFAULT_STORY_MP4_TIME_SUFFIX
     for n in range(1, 10000):
         name = f"{stem}-{mm}+{ss}+{safe_suffix} ({n}).mp4"
         p = final_dir / name
-        if not p.exists():
+        key = str(p.resolve())
+        if not p.exists() and (reserved_paths is None or key not in reserved_paths):
+            if reserved_paths is not None:
+                reserved_paths.add(key)
             return p
     raise SystemExit("无法生成不冲突的关键词时间 MP4 文件名")
 
@@ -398,6 +504,10 @@ def generate_one_story(
     mp4_height: str | None,
     mp4_show_bar: bool,
     shouxing_dir: str = "shouxing",
+    mp4_export_jobs: list[dict] | None = None,
+    mp4_job_label: str = "",
+    mp4_export_print_lock: threading.Lock | None = None,
+    mp4_reserved_paths: set[str] | None = None,
 ) -> None:
     lines = load_non_empty_lines(txt_path)
     if not lines:
@@ -540,9 +650,11 @@ def generate_one_story(
         export_js = repo_root / "export_mp4_from_html.js"
         if not export_js.is_file():
             raise SystemExit(f"自动导出需要存在 {export_js}")
-        node = shutil.which("node")
-        if not node:
-            raise SystemExit("未在 PATH 中找到 node（可加 --no-export-mp4 跳过）")
+        defer_mp4 = mp4_export_jobs is not None
+        if not defer_mp4:
+            node = shutil.which("node")
+            if not node:
+                raise SystemExit("未在 PATH 中找到 node（可加 --no-export-mp4 跳过）")
         if mp4_out is not None:
             mp4_path = Path(mp4_out).expanduser().resolve()
         elif mp4_final_dir is not None and mp4_naming_stem:
@@ -550,7 +662,12 @@ def generate_one_story(
             suffix_fix = (story_mp4_time_suffix or _DEFAULT_STORY_MP4_TIME_SUFFIX).strip()
             if kw and hi_page0 is not None and hi_mm is not None:
                 mp4_path = _allocate_keyword_time_mp4_path(
-                    mp4_final_dir, stem_name, hi_mm, hi_ss, suffix_fix
+                    mp4_final_dir,
+                    stem_name,
+                    hi_mm,
+                    hi_ss,
+                    suffix_fix,
+                    reserved_paths=mp4_reserved_paths,
                 )
                 print(
                     f"    成稿 MP4：关键词「{kw}」首次第 {hi_page0 + 1} 页，"
@@ -560,39 +677,45 @@ def generate_one_story(
                 if kw and hi_page0 is None:
                     print(f"    未在文案分页中找到「{kw}」，成稿 MP4 使用默认命名")
                 mp4_path = _allocate_mp4_path(
-                    mp4_final_dir, stem_name, mp4_run_k, mp4_n_runs
+                    mp4_final_dir,
+                    stem_name,
+                    mp4_run_k,
+                    mp4_n_runs,
+                    reserved_paths=mp4_reserved_paths,
                 )
         else:
             mp4_path = out_dir / "story.mp4"
         mp4_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            node,
-            str(export_js),
-            "--story",
-            str(out_dir),
-            "--out",
-            str(mp4_path),
-        ]
-        if mp4_width:
-            cmd.extend(["--width", str(mp4_width)])
-        if mp4_height:
-            cmd.extend(["--height", str(mp4_height)])
-        if not mp4_show_bar:
-            cmd.append("--hide-bar")
-        ff = resolve_ffmpeg_for_mp4_export()
-        if not ff:
-            raise SystemExit(
-                "导出 MP4 需要带 libx264 的 ffmpeg。可执行：brew install ffmpeg，"
-                "或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
+        if defer_mp4:
+            mp4_export_jobs.append(
+                {
+                    "repo_root": repo_root,
+                    "story_dir": out_dir,
+                    "mp4_path": mp4_path,
+                    "mp4_width": mp4_width,
+                    "mp4_height": mp4_height,
+                    "mp4_show_bar": mp4_show_bar,
+                    "label": mp4_job_label,
+                    "print_lock": mp4_export_print_lock,
+                }
             )
-        env = os.environ.copy()
-        env["FFMPEG_PATH"] = ff
-        print("    导出 MP4 …")
-        t0 = time.perf_counter()
-        subprocess.run(cmd, cwd=str(repo_root), check=True, env=env)
-        elapsed = time.perf_counter() - t0
-        size_mb = mp4_path.stat().st_size / (1024 * 1024)
-        print(f"    MP4：{mp4_path}  ({elapsed:.1f}s, {size_mb:.2f} MiB)")
+        else:
+            ff = resolve_ffmpeg_for_mp4_export()
+            if not ff:
+                raise SystemExit(
+                    "导出 MP4 需要带 libx264 的 ffmpeg。可执行：brew install ffmpeg，"
+                    "或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
+                )
+            run_story_mp4_export(
+                repo_root=repo_root,
+                story_dir=out_dir,
+                mp4_path=mp4_path,
+                mp4_width=mp4_width,
+                mp4_height=mp4_height,
+                mp4_show_bar=mp4_show_bar,
+                label="",
+                print_lock=None,
+            )
 
 
 def main() -> None:
@@ -656,6 +779,13 @@ def main() -> None:
     )
     parser.add_argument("--mp4-width", default=None, help="传给 export 的 --width")
     parser.add_argument("--mp4-height", default=None, help="传给 export 的 --height")
+    parser.add_argument(
+        "--mp4-export-workers",
+        type=int,
+        default=2,
+        metavar="N",
+        help="wenan 批量导出多个 MP4 时的最大并发数（默认 2；1 表示顺序导出）",
+    )
     parser.add_argument(
         "--mp4-show-bar",
         action="store_true",
@@ -798,6 +928,20 @@ def main() -> None:
     print(f"\n每个文稿 {n} 套，{len(nonempty)} 个文稿 → 最多 {len(nonempty) * n} 套。\n")
 
     draft_sfx, final_sfx = _story_suffixes()
+    batch_job_count = len(nonempty) * n
+    mp4_jobs: list[dict] | None = (
+        [] if (export_mp4 and batch_job_count > 1) else None
+    )
+    mp4_print_lock = threading.Lock() if mp4_jobs is not None else None
+    mp4_reserved_paths: set[str] | None = set() if mp4_jobs is not None else None
+    if mp4_jobs is not None:
+        _preflight_mp4_export_environment(repo_root)
+        w_cap = max(1, args.mp4_export_workers)
+        print(
+            f"本批 HTML 顺序生成；{batch_job_count} 个 MP4 将在完成后并行导出"
+            f"（最大并发 {min(w_cap, batch_job_count)}）。\n"
+        )
+
     total_jobs = 0
     for txt_path in nonempty:
         stem = _safe_output_stem(txt_path)
@@ -836,9 +980,35 @@ def main() -> None:
                     mp4_height=args.mp4_height,
                     mp4_show_bar=args.mp4_show_bar,
                     shouxing_dir=args.shouxing_dir,
+                    mp4_export_jobs=mp4_jobs,
+                    mp4_job_label=f"[{total_jobs}]",
+                    mp4_export_print_lock=mp4_print_lock,
+                    mp4_reserved_paths=mp4_reserved_paths,
                 )
             except subprocess.CalledProcessError as e:
                 raise SystemExit(f"子进程失败（退出码 {e.returncode}）") from e
+
+    if mp4_jobs:
+        w = min(max(1, args.mp4_export_workers), len(mp4_jobs))
+        print(f"\n并行导出 MP4：共 {len(mp4_jobs)} 个，并发 {w} …")
+        errors: list[tuple[str, BaseException]] = []
+        with ThreadPoolExecutor(max_workers=w) as ex:
+            future_to_label = {
+                ex.submit(_run_one_mp4_export_job, job): str(job.get("label", ""))
+                for job in mp4_jobs
+            }
+            for fut in as_completed(future_to_label):
+                label = future_to_label[fut]
+                try:
+                    fut.result()
+                except BaseException as exc:
+                    if isinstance(exc, KeyboardInterrupt):
+                        raise
+                    errors.append((label, exc))
+        if errors:
+            for lbl, exc in errors:
+                print(f"MP4 导出失败 {lbl}: {exc}", file=sys.stderr)
+            raise SystemExit(f"{len(errors)} 个 MP4 导出失败")
 
     print(f"\n全部完成：共 {total_jobs} 套，根目录 {base_out}")
 
