@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,6 +33,28 @@ from generate_animated_text import estimate_phrase_html_duration_seconds
 
 _WENAN_DIR_NAME = "wenan"
 _FADE_OUT_SECONDS = 1.0
+
+_HOMEBREW_FFMPEG_CANDIDATES = (
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+)
+
+
+def resolve_ffmpeg_for_mp4_export() -> str | None:
+    """供 Node 导出 MP4 使用：尊重已有 FFMPEG_PATH，其次 PATH，再试 Homebrew 常见路径。"""
+    env_p = os.environ.get("FFMPEG_PATH")
+    if env_p:
+        p = Path(env_p).expanduser()
+        if p.is_file():
+            return str(p.resolve())
+    w = shutil.which("ffmpeg")
+    if w:
+        return w
+    for c in _HOMEBREW_FFMPEG_CANDIDATES:
+        cp = Path(c)
+        if cp.is_file():
+            return str(cp.resolve())
+    return None
 
 
 def load_non_empty_lines(path: Path) -> list[str]:
@@ -218,9 +241,17 @@ def generate_one_story(
             cmd.extend(["--height", str(mp4_height)])
         if not mp4_show_bar:
             cmd.append("--hide-bar")
+        ff = resolve_ffmpeg_for_mp4_export()
+        if not ff:
+            raise SystemExit(
+                "导出 MP4 需要带 libx264 的 ffmpeg。可执行：brew install ffmpeg，"
+                "或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
+            )
+        env = os.environ.copy()
+        env["FFMPEG_PATH"] = ff
         print("    导出 MP4 …")
         t0 = time.perf_counter()
-        subprocess.run(cmd, cwd=str(repo_root), check=True)
+        subprocess.run(cmd, cwd=str(repo_root), check=True, env=env)
         elapsed = time.perf_counter() - t0
         size_mb = mp4_path.stat().st_size / (1024 * 1024)
         print(f"    MP4：{mp4_path}  ({elapsed:.1f}s, {size_mb:.2f} MiB)")

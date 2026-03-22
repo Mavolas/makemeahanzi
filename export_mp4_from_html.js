@@ -9,13 +9,54 @@
  *  1) 单页：--in phrase.html
  *  2) 多页故事：--story <目录或index.html>（含 index.html + story_meta.json）
  *
- * 依赖：npm i playwright；系统 PATH 中需要有 ffmpeg
+ * 依赖：npm i playwright；WebM→MP4（H.264）需要带 libx264 的完整 ffmpeg（如 brew install ffmpeg），
+ * Playwright 自带的 ffmpeg 仅用于录屏管线，不含 libx264 / mov 高级选项，不能单独用来转 MP4。
+ * 可通过 FFMPEG_PATH 指定可执行文件；未设置时会尝试 PATH，以及 Homebrew 常见路径
+ * （/opt/homebrew/bin/ffmpeg、/usr/local/bin/ffmpeg）。
  */
 
 const fs = require('fs');
 const path = require('path');
 const childProcess = require('child_process');
 const { pathToFileURL } = require('url');
+
+/** macOS Homebrew 典型安装位置（Apple Silicon / Intel） */
+const HOMEBREW_FFMPEG_CANDIDATES = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg'];
+
+function ffmpegSupportsLibx264(ffmpegBin) {
+  try {
+    const out = childProcess.execFileSync(ffmpegBin, ['-hide_banner', '-encoders'], {
+      encoding: 'utf8',
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return /\blibx264\b/.test(out);
+  } catch {
+    return false;
+  }
+}
+
+function resolveFfmpegExecutable() {
+  const fromEnv = process.env.FFMPEG_PATH;
+  if (fromEnv) {
+    if (!fs.existsSync(fromEnv)) {
+      throw new Error(`FFMPEG_PATH 不存在：${fromEnv}`);
+    }
+    if (!ffmpegSupportsLibx264(fromEnv)) {
+      throw new Error(`FFMPEG_PATH 指向的 ffmpeg 不含 libx264，无法编码 MP4：${fromEnv}`);
+    }
+    return fromEnv;
+  }
+
+  if (ffmpegSupportsLibx264('ffmpeg')) return 'ffmpeg';
+
+  for (const p of HOMEBREW_FFMPEG_CANDIDATES) {
+    if (fs.existsSync(p) && ffmpegSupportsLibx264(p)) return p;
+  }
+
+  throw new Error(
+    '未找到带 libx264 的 ffmpeg，无法把录制的 WebM 转成 MP4。Playwright 自带的 ffmpeg 仅为精简版（无 H.264）。请安装完整版，例如：brew install ffmpeg',
+  );
+}
 
 function parseArgs(argv) {
   const out = {};
@@ -227,7 +268,8 @@ async function main() {
   await browser.close();
 
   // webm → mp4
-  console.log(`[export] ffmpeg 转码 → ${absOut}`);
+  const ffmpegBin = resolveFfmpegExecutable();
+  console.log(`[export] ffmpeg 转码（${ffmpegBin}）→ ${absOut}`);
   const ffArgs = [
     '-y',
     '-i',
@@ -240,7 +282,7 @@ async function main() {
     '+faststart',
     absOut,
   ];
-  childProcess.execFileSync('ffmpeg', ffArgs, { stdio: 'inherit' });
+  childProcess.execFileSync(ffmpegBin, ffArgs, { stdio: 'inherit' });
 
   // 清理临时目录
   try {
