@@ -818,11 +818,15 @@ def build_html(
     line_gap_px: int = 24,
     canvas_bg_image: Optional[str] = None,
     story_index_bridge: bool = False,
+    transparent_canvas_backdrop: bool = False,
 ) -> str:
     # 固定画布：底色/背景图在 .canvas-backdrop，.phrase 叠在上层（story index 方式2 仅淡出 .phrase 时背景不动）
     safe_title = html.escape(out_title)
     safe_bg = html.escape(canvas_bg)
-    if canvas_bg_image:
+    if transparent_canvas_backdrop:
+        canvas_bg_css = "background: transparent;"
+        body_page_bg = "transparent"
+    elif canvas_bg_image:
         # url() 内对中文/空格等编码；文件与 HTML 同目录时用文件名即可
         safe_img_url = quote(canvas_bg_image, safe="")
         canvas_bg_css = f"""background-color: {safe_bg};
@@ -830,8 +834,10 @@ def build_html(
       background-size: cover;
       background-position: center;
       background-repeat: no-repeat;"""
+        body_page_bg = "#e8e8e8"
     else:
         canvas_bg_css = f"background: {safe_bg};"
+        body_page_bg = "#e8e8e8"
     bridge_html = _story_index_bridge_script() if story_index_bridge else ""
     return f"""<!doctype html>
 <html lang="zh">
@@ -846,7 +852,7 @@ def build_html(
       display: flex;
       align-items: center;
       justify-content: center;
-      background: #e8e8e8;
+      background: {body_page_bg};
       font-family: system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     }}
     .canvas {{
@@ -961,6 +967,11 @@ def main() -> None:
         "--story-index-bridge",
         action="store_true",
         help="注入 postMessage 桥接脚本，供 generate_story index 方式2 在子页内淡出文字（file:// 下父页无法读 iframe 文档时必需）",
+    )
+    parser.add_argument(
+        "--transparent-canvas-backdrop",
+        action="store_true",
+        help="子页 .canvas-backdrop 透明、body 背景透明；由 index 的 storyStaticBackdrop 铺底，避免 iframe 换页时背景闪断",
     )
     parser.add_argument("--start-delay", type=float, default=0.0, help="第一个字的起始延迟（秒）")
     parser.add_argument(
@@ -1261,6 +1272,7 @@ def main() -> None:
         line_gap_px=args.line_gap_px,
         canvas_bg_image=args.canvas_bg_image,
         story_index_bridge=bool(args.story_index_bridge),
+        transparent_canvas_backdrop=bool(args.transparent_canvas_backdrop),
     )
 
     with open(out_path, "w", encoding="utf-8") as f:

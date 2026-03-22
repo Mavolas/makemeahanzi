@@ -7,7 +7,7 @@
   则以 5:1 权重相对「仅纯色」随机选背景图（CSS cover 铺满，小图等比放大）并配随机淡色底；否则仅随机纯色（与 backgrounds.py 一致）。
   指定 --canvas-bg 或 --canvas-bg-image 则全 story 按参数，不再走上述逻辑。
 index.html 页间切换可用 --story-page-transition 配置（默认 text=方式2）：
-  · text（方式2，默认）：子页注入 --story-index-bridge，由 index 通过 postMessage 触发页内 .phrase / #handOverlay 淡出（file:// 下父页无法读 iframe 文档时仍有效）；底色与背景图在 .canvas-backdrop 上不动。
+  · text（方式2，默认）：子页注入 --story-index-bridge + --transparent-canvas-backdrop；index 内 storyStaticBackdrop 与整 story 画布一致，子页背景透明，iframe 换 src 时底图不闪断。
   · default（方式1）：有 --canvas-bg-image 时为整页 iframe 淡入淡出；纯 --canvas-bg 时为同色遮罩后切页。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
@@ -39,6 +39,7 @@ import argparse
 import html
 import json
 import os
+from urllib.parse import quote
 import random
 import re
 import shutil
@@ -147,6 +148,10 @@ def _gen_extra_has_speed(extra: list[str]) -> bool:
 
 def _gen_extra_has_story_index_bridge(extra: list[str]) -> bool:
     return "--story-index-bridge" in extra
+
+
+def _gen_extra_has_transparent_canvas_backdrop(extra: list[str]) -> bool:
+    return "--transparent-canvas-backdrop" in extra
 
 
 def _gen_extra_has_hand_image(extra: list[str]) -> bool:
@@ -656,6 +661,8 @@ def generate_one_story(
     if story_page_transition == _STORY_PAGE_TRANSITION_TEXT:
         if not _gen_extra_has_story_index_bridge(effective_extra):
             effective_extra = ["--story-index-bridge", *effective_extra]
+    if not _gen_extra_has_transparent_canvas_backdrop(effective_extra):
+        effective_extra = ["--transparent-canvas-backdrop", *effective_extra]
 
     for idx, phrase in enumerate(pages, start=1):
         name = f"page_{idx:03d}.html"
@@ -745,6 +752,7 @@ def generate_one_story(
             stage_background=story_canvas_bg,
             transition_kind=transition_kind,
             story_bridge_id_js=story_bridge_id_js,
+            index_static_backdrop_image=bg_img_bn,
         ),
         encoding="utf-8",
     )
@@ -1146,6 +1154,7 @@ def _build_index_html(
     stage_background: str = "#ffffff",
     transition_kind: str = "color_overlay",
     story_bridge_id_js: str = '""',
+    index_static_backdrop_image: str | None = None,
 ) -> str:
     pages_json = json.dumps(pages, ensure_ascii=False)
     durs_json = json.dumps(durations)
@@ -1154,6 +1163,15 @@ def _build_index_html(
     safe_stage_bg = html.escape(stage_background)
     safe_fade_layer_bg = safe_stage_bg
     kind_js = json.dumps(transition_kind)
+    if index_static_backdrop_image:
+        safe_img_url = quote(index_static_backdrop_image, safe="")
+        static_backdrop_css = f"""background-color: {safe_stage_bg};
+      background-image: url(\"{safe_img_url}\");
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;"""
+    else:
+        static_backdrop_css = f"background: {safe_stage_bg};"
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -1171,17 +1189,28 @@ def _build_index_html(
       position: relative;
       width: 100%;
       height: 100%;
-      background: {safe_stage_bg};
+      background: transparent;
+    }}
+    #storyStaticBackdrop {{
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      {static_backdrop_css}
     }}
     #view {{
+      position: relative;
+      z-index: 1;
       width: 100%;
       height: 100%;
       border: 0;
       display: block;
+      background: transparent;
     }}
     #whiteFade {{
       position: absolute;
       inset: 0;
+      z-index: 2;
       background: {safe_fade_layer_bg};
       opacity: 0;
       pointer-events: none;
@@ -1201,6 +1230,7 @@ def _build_index_html(
 </head>
 <body>
   <div id="stage">
+    <div id="storyStaticBackdrop" aria-hidden="true"></div>
     <iframe id="view" title="当前页"></iframe>
     <div id="whiteFade" aria-hidden="true"></div>
   </div>
