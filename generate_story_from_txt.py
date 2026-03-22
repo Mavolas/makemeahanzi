@@ -263,6 +263,35 @@ _HOMEBREW_FFMPEG_CANDIDATES = (
 )
 
 
+def _windows_merged_path_for_which() -> str | None:
+    """GUI/IDE 子进程常未继承安装后刷新的 PATH；合并注册表与当前环境以便找到 winget 等安装的 ffmpeg。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    chunks: list[str] = []
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ) as k:
+            chunks.append(winreg.QueryValueEx(k, "Path")[0])
+    except OSError:
+        pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as k:
+            chunks.append(winreg.QueryValueEx(k, "Path")[0])
+    except OSError:
+        pass
+    cur = os.environ.get("PATH", "")
+    if cur:
+        chunks.append(cur)
+    merged = os.pathsep.join(c for c in chunks if c)
+    return merged or None
+
+
 def resolve_ffmpeg_for_mp4_export() -> str | None:
     """供 Node 导出 MP4 使用：尊重已有 FFMPEG_PATH，其次 PATH，再试 Homebrew 常见路径。"""
     env_p = os.environ.get("FFMPEG_PATH")
@@ -273,6 +302,11 @@ def resolve_ffmpeg_for_mp4_export() -> str | None:
     w = shutil.which("ffmpeg")
     if w:
         return w
+    wp = _windows_merged_path_for_which()
+    if wp:
+        w = shutil.which("ffmpeg", path=wp)
+        if w:
+            return w
     for c in _HOMEBREW_FFMPEG_CANDIDATES:
         cp = Path(c)
         if cp.is_file():
@@ -290,8 +324,8 @@ def _preflight_mp4_export_environment(repo_root: Path) -> None:
     ff = resolve_ffmpeg_for_mp4_export()
     if not ff:
         raise SystemExit(
-            "导出 MP4 需要带 libx264 的 ffmpeg。可执行：brew install ffmpeg，"
-            "或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
+            "导出 MP4 需要带 libx264 的 ffmpeg。Windows：winget install Gyan.FFmpeg；"
+            "macOS：brew install ffmpeg；或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
         )
 
 
@@ -818,8 +852,8 @@ def generate_one_story(
             ff = resolve_ffmpeg_for_mp4_export()
             if not ff:
                 raise SystemExit(
-                    "导出 MP4 需要带 libx264 的 ffmpeg。可执行：brew install ffmpeg，"
-                    "或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
+                    "导出 MP4 需要带 libx264 的 ffmpeg。Windows：winget install Gyan.FFmpeg；"
+                    "macOS：brew install ffmpeg；或设置环境变量 FFMPEG_PATH 指向 ffmpeg 可执行文件。"
                 )
             run_story_mp4_export(
                 repo_root=repo_root,
