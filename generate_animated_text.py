@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from backgrounds import pick_random_canvas_background
+
 
 def resolve_hand_image_path(hand_image: str, repo_root: Path) -> Optional[Path]:
     """解析手形 PNG：先试当前工作目录，再试仓库根（与默认「手形1.png」一致）。"""
@@ -611,7 +613,12 @@ def main() -> None:
     parser.add_argument("--line-gap-px", type=int, default=48, help="两行之间的垂直间距（px）")
     parser.add_argument("--canvas-width", type=int, default=1054, help="固定背景画布宽度（px）")
     parser.add_argument("--canvas-height", type=int, default=588, help="固定背景画布高度（px）")
-    parser.add_argument("--canvas-bg", default="#d6e9f8", help="画布背景色（默认淡蓝色）")
+    parser.add_argument(
+        "--canvas-bg",
+        default=None,
+        metavar="HEX",
+        help="画布背景色（如 #d6e9f8）；省略则每次从 backgrounds 随机淡色",
+    )
     parser.add_argument("--start-delay", type=float, default=0.0, help="第一个字的起始延迟（秒）")
     parser.add_argument(
         "--sequence-mode",
@@ -800,6 +807,13 @@ def main() -> None:
                 debug_show=args.hand_debug_show,
             )
 
+    if args.canvas_bg:
+        canvas_bg = args.canvas_bg
+    else:
+        _picked = pick_random_canvas_background()
+        canvas_bg = _picked.hex
+        print(f"画布背景（随机）：{_picked.name} {_picked.hex}")
+
     html_out = build_html(
         phrase=phrase,
         pieces_html=pieces_html,
@@ -809,7 +823,7 @@ def main() -> None:
         hand_js=hand_js,
         canvas_width=args.canvas_width,
         canvas_height=args.canvas_height,
-        canvas_bg=args.canvas_bg,
+        canvas_bg=canvas_bg,
         line_gap_px=args.line_gap_px,
     )
 

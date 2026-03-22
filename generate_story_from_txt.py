@@ -3,6 +3,7 @@
 """
 从纯文本文案生成「多页」手写动画，每页两行（跳过空行），每页调用 generate_animated_text.py，
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
+未在「--」后指定 --canvas-bg 时，整套 story 共用随机淡色背景（每页相同）；指定 --canvas-bg 则全 story 用该色。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
 再只问一次「每个文稿统一生成多少套」。
@@ -33,8 +34,19 @@ import time
 from pathlib import Path
 
 from generate_animated_text import estimate_phrase_html_duration_seconds
+from backgrounds import pick_random_canvas_background
 
 _WENAN_DIR_NAME = "wenan"
+
+
+def _gen_extra_has_canvas_bg(extra: list[str]) -> bool:
+    """是否在传给 generate_animated_text.py 的参数里已指定画布背景。"""
+    for tok in extra:
+        if tok == "--canvas-bg":
+            return True
+        if tok.startswith("--canvas-bg=") and len(tok) > len("--canvas-bg="):
+            return True
+    return False
 
 
 def _default_output_root() -> Path:
@@ -213,6 +225,12 @@ def generate_one_story(
     page_files: list[str] = []
     durations: list[float] = []
 
+    effective_extra = list(gen_extra)
+    if not _gen_extra_has_canvas_bg(effective_extra):
+        story_bg = pick_random_canvas_background()
+        effective_extra = ["--canvas-bg", story_bg.hex, *effective_extra]
+        print(f"    本套 story 统一画布：{story_bg.name} {story_bg.hex}")
+
     for idx, phrase in enumerate(pages, start=1):
         name = f"page_{idx:03d}.html"
         out_html = out_dir / name
@@ -222,7 +240,7 @@ def generate_one_story(
             phrase,
             "--out",
             str(out_html),
-            *gen_extra,
+            *effective_extra,
         ]
         print(f"    [{idx}/{len(pages)}] {name}")
         subprocess.run(cmd, cwd=str(repo_root), check=True)
