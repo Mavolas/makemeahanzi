@@ -31,6 +31,39 @@ def resolve_hand_image_path(hand_image: str, repo_root: Path) -> Optional[Path]:
     return None
 
 
+def parse_hand_tip_xy_from_filename(path: Path) -> tuple[Optional[float], Optional[float]]:
+    """
+    从文件名解析笔尖在图内的像素坐标（左上角为 0,0）。
+    匹配片段形如「-3+61」→ x=3, y=61（例：手形-3+61 (1).png）。
+    """
+    m = re.search(r"-(\d+)\+(\d+)", path.stem)
+    if not m:
+        return None, None
+    return float(m.group(1)), float(m.group(2))
+
+
+def read_png_pixel_size(path: Path) -> Optional[tuple[int, int]]:
+    """读取 PNG 的 IHDR 宽高（不依赖 Pillow）。"""
+    try:
+        with path.open("rb") as f:
+            if f.read(8) != b"\x89PNG\r\n\x1a\n":
+                return None
+            length = int.from_bytes(f.read(4), "big")
+            ctype = f.read(4)
+            if ctype != b"IHDR" or length < 8:
+                return None
+            data = f.read(length)
+            if len(data) < 8:
+                return None
+            w = int.from_bytes(data[0:4], "big")
+            h = int.from_bytes(data[4:8], "big")
+            if w <= 0 or h <= 0:
+                return None
+            return (w, h)
+    except OSError:
+        return None
+
+
 ANIM_DELAY_RE = re.compile(r"animation-delay:\s*([0-9]+(?:\.[0-9]+)?)s;")
 ANIM_DURATION_RE = re.compile(
     # SVG 合成时 keyframes 名称可能被加前缀：例如 c0_keyframes0
@@ -558,6 +591,7 @@ def build_hand_overlay_js(
     visibility: {'visible' if debug_show else 'hidden'};
     pointer-events: none;
     z-index: 9999;
+    transform-origin: 0 0;
     transform: translate({-hotspotXpx}px, {-hotspotYpx}px) rotate(0deg) scale({flipX}, {flipY});
   "
 />
@@ -795,21 +829,62 @@ def main() -> None:
     # 假设输出 HTML 和图片都在当前脚本运行目录（仓库根目录）
     parser.add_argument(
         "--hand-image",
-        default="手形1.png",
-        help="手形图片路径（默认：手形1.png，会在当前目录与脚本所在仓库根目录查找）；"
-        "生成时会复制到输出 HTML 同目录以便相对路径加载；找不到则跳过手形",
+        default="手形-3+61 (1).png",
+        help="手形 PNG 路径（默认：手形-3+61 (1).png；文件名中含 -Mx+Ny 时可自动识别笔尖像素坐标）；"
+        "会在当前目录与仓库根查找；生成时复制到输出 HTML 同目录",
     )
-    parser.add_argument("--hand-width", type=int, default=120, help="手形显示宽度（px）")
-    parser.add_argument("--hand-height", type=int, default=105, help="手形显示高度（px）")
+    parser.add_argument(
+        "--hand-width",
+        type=int,
+        default=None,
+        metavar="PX",
+        help="手形显示宽度（px）；省略则用 --hand-image 的 PNG 原始宽度",
+    )
+    parser.add_argument(
+        "--hand-height",
+        type=int,
+        default=None,
+        metavar="PX",
+        help="手形显示高度（px）；省略则用 --hand-image 的 PNG 原始高度",
+    )
     parser.add_argument("--hand-opacity", type=float, default=1.0, help="手形透明度（0-1）")
-    parser.add_argument("--hand-hotspot-x", type=float, default=0.02, help="手形热点在宽度的比例(0-1)，用于贴合笔尖")
-    parser.add_argument("--hand-hotspot-y", type=float, default=0.2, help="手形热点在高度的比例(0-1)，用于贴合笔尖")
+    parser.add_argument(
+        "--hand-tip-x",
+        type=float,
+        default=None,
+        metavar="PX",
+        help="笔尖在 PNG 内的 x 像素（左上角为 0）；与 --hand-tip-y 成对使用则优先于热点比例",
+    )
+    parser.add_argument(
+        "--hand-tip-y",
+        type=float,
+        default=None,
+        metavar="PX",
+        help="笔尖在 PNG 内的 y 像素；若均未指定且文件名含 -Mx+Ny 则自动解析",
+    )
+    parser.add_argument(
+        "--hand-hotspot-x",
+        type=float,
+        default=0.02,
+        help="未使用笔尖像素时：热点在显示宽度上的比例(0-1)",
+    )
+    parser.add_argument(
+        "--hand-hotspot-y",
+        type=float,
+        default=0.2,
+        help="未使用笔尖像素时：热点在显示高度上的比例(0-1)",
+    )
     parser.add_argument("--hand-rotate", action="store_true", help="是否让手形沿切线旋转")
-    # 默认就反转/放大，符合“直接跑就是手形正确方向和大小”的需求
+    # 默认水平/垂直翻转以贴合笔尖方向；手形尺寸默认取 PNG 原始像素 × --hand-scale
     parser.add_argument("--hand-flip-x", action="store_true", default=True, help="水平翻转手形（解决反着）")
     parser.add_argument("--hand-flip-y", action="store_true", default=True, help="垂直翻转手形（默认不翻）")
     parser.add_argument("--hand-rotate-extra", type=float, default=180.0, help="额外旋转角度（度），用于微调手的方向")
-    parser.add_argument("--hand-scale", type=float, default=3.5, help="手形整体缩放倍数（比直接改宽高更方便）")
+    parser.add_argument(
+        "--hand-scale",
+        type=float,
+        default=1.0,
+        help="在（指定或从图片读出的）宽高上再乘的倍数，默认 1 即不额外缩放",
+    )
     parser.add_argument("--hand-debug-show", action="store_true", help="调试：不等 JS 就先把手形显示出来（用于排查“不见了”）")
     parser.add_argument(
         "--hand-mode",
@@ -829,6 +904,7 @@ def main() -> None:
 
     # 手形图：解析源文件，并复制到输出 HTML 同目录（避免 story_output/page.html 相对路径找不到根目录的 PNG）
     hand_image_url: Optional[str] = None
+    hand_src: Optional[Path] = None
     if args.hand_image:
         hand_src = resolve_hand_image_path(args.hand_image, repo_root)
         if hand_src:
@@ -844,6 +920,44 @@ def main() -> None:
                 f"警告：找不到手形图片「{args.hand_image}」（已试过当前目录与 {repo_root}），将不显示手形。",
                 file=sys.stderr,
             )
+
+    # 手形占位尺寸：默认取 PNG 原始像素；可单独覆盖宽/高；再乘 --hand-scale
+    _hand_fallback_w, _hand_fallback_h = 120, 105
+    hand_intrinsic_w, hand_intrinsic_h = _hand_fallback_w, _hand_fallback_h
+    if hand_src:
+        sz = read_png_pixel_size(hand_src)
+        if sz:
+            hand_intrinsic_w, hand_intrinsic_h = sz
+        else:
+            print(
+                f"警告：无法从「{hand_src.name}」读取 PNG 宽高，手形尺寸暂用 {_hand_fallback_w}×{_hand_fallback_h}",
+                file=sys.stderr,
+            )
+    base_hand_w = args.hand_width if args.hand_width is not None else hand_intrinsic_w
+    base_hand_h = args.hand_height if args.hand_height is not None else hand_intrinsic_h
+    if args.hand_scale <= 0:
+        raise SystemExit("--hand-scale 须为大于 0 的数")
+    hand_w = max(1, int(round(base_hand_w * args.hand_scale)))
+    hand_h = max(1, int(round(base_hand_h * args.hand_scale)))
+
+    tip_x = args.hand_tip_x
+    tip_y = args.hand_tip_y
+    if (tip_x is not None) ^ (tip_y is not None):
+        raise SystemExit("--hand-tip-x 与 --hand-tip-y 须同时指定，或均省略以使用文件名/比例")
+    if tip_x is None and tip_y is None and hand_src:
+        ax, ay = parse_hand_tip_xy_from_filename(hand_src)
+        if ax is not None and ay is not None:
+            tip_x, tip_y = ax, ay
+            print(
+                f"手形笔尖（自文件名，相对 PNG 左上角）: x={tip_x:g}, y={tip_y:g} → "
+                f"比例 {tip_x / hand_intrinsic_w:.4f}, {tip_y / hand_intrinsic_h:.4f}"
+            )
+    if tip_x is not None and tip_y is not None:
+        hotspot_x_ratio = tip_x / hand_intrinsic_w
+        hotspot_y_ratio = tip_y / hand_intrinsic_h
+    else:
+        hotspot_x_ratio = args.hand_hotspot_x
+        hotspot_y_ratio = args.hand_hotspot_y
 
     if not os.path.isdir(svg_dir):
         raise SystemExit(f"找不到 svg 目录：{svg_dir}（请检查 --svg-dir）")
@@ -897,8 +1011,6 @@ def main() -> None:
             timeline = extract_stroke_timeline(svg_text, prefix=prefix)
             if timeline:
                 if args.hand_mode == "per-char":
-                    hand_w = int(args.hand_width * args.hand_scale)
-                    hand_h = int(args.hand_height * args.hand_scale)
                     svg_text = inject_hand_image(
                         svg_text=svg_text,
                         prefix=prefix,
@@ -946,23 +1058,21 @@ def main() -> None:
             hand_js = build_hand_js(
                 tracks=hand_tracks,
                 rotate_hand=args.hand_rotate,
-                hotspot_x_ratio=args.hand_hotspot_x,
-                hotspot_y_ratio=args.hand_hotspot_y,
+                hotspot_x_ratio=hotspot_x_ratio,
+                hotspot_y_ratio=hotspot_y_ratio,
                 flip_x=args.hand_flip_x,
                 flip_y=args.hand_flip_y,
                 rotate_extra_deg=args.hand_rotate_extra,
             )
         elif args.hand_mode == "overlay" and stroke_items:
-            hand_w = int(args.hand_width * args.hand_scale)
-            hand_h = int(args.hand_height * args.hand_scale)
             hand_js = build_hand_overlay_js(
                 stroke_items=stroke_items,
                 hand_image_href=hand_image_url,
                 hand_width=hand_w,
                 hand_height=hand_h,
                 hand_opacity=args.hand_opacity,
-                hotspot_x_ratio=args.hand_hotspot_x,
-                hotspot_y_ratio=args.hand_hotspot_y,
+                hotspot_x_ratio=hotspot_x_ratio,
+                hotspot_y_ratio=hotspot_y_ratio,
                 rotate_hand=args.hand_rotate,
                 flip_x=args.hand_flip_x,
                 flip_y=args.hand_flip_y,
