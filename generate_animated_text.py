@@ -274,6 +274,38 @@ def namespace_svg(svg_text: str, prefix: str) -> str:
     return svg_text
 
 
+def apply_stroke_linejoin_to_animation_paths(svg_text: str, linejoin: str) -> str:
+    """
+    为 id 含 make-me-a-hanzi-animation- 的 path 设置 stroke-linejoin（多段折线拐角样式）。
+    须在 namespace_svg 之后调用，以匹配带前缀的 id。
+    """
+    lj = linejoin.strip().lower()
+    if lj not in ("round", "miter", "bevel"):
+        return svg_text
+    attr = f'stroke-linejoin="{lj}"'
+
+    def repl(m: re.Match[str]) -> str:
+        open_, mid, close = m.group(1), m.group(2), m.group(3)
+        if re.search(r"\bstroke-linejoin\s*=", mid, re.I):
+            mid2 = re.sub(
+                r'\bstroke-linejoin\s*=\s*["\'][^"\']*["\']',
+                attr,
+                mid,
+                count=1,
+                flags=re.I,
+            )
+        else:
+            mid2 = mid.rstrip() + " " + attr
+        return open_ + mid2 + close
+
+    return re.sub(
+        r'(<path\b)([^>]*\bid\s*=\s*["\'][^"\']*make-me-a-hanzi-animation-\d+[^"\']*["\'][^>]*)(>)',
+        repl,
+        svg_text,
+        flags=re.IGNORECASE,
+    )
+
+
 def shift_animation_delays(svg_text: str, offset_seconds: float) -> str:
     def repl(m: re.Match) -> str:
         original = float(m.group(1))
@@ -789,7 +821,7 @@ def main() -> None:
     parser.add_argument(
         "--stroke-width-px",
         type=float,
-        default=11.0,
+        default=28.0,
         metavar="PX",
         help="笔画线宽（约等于屏幕像素），按 viewBox 与 --char-size 换算后写入 SVG 动画；≤0 保留源 SVG 线宽",
     )
@@ -799,6 +831,12 @@ def main() -> None:
         default=1.0,
         metavar="R",
         help="每个笔画动画内：书写最细相对写完最粗的比例（0～1）。1=全程等粗（推荐，避免细灰/粗黑混杂）；0.5～0.65 略有粗细变化；0.125≈MMH 原始 128/1024",
+    )
+    parser.add_argument(
+        "--stroke-linejoin",
+        choices=["round", "miter", "bevel", "none"],
+        default="round",
+        help="动画 path 的 stroke-linejoin（折角）：round 圆角、miter 尖角、bevel 斜切；none 不插入/不改该属性",
     )
     parser.add_argument("--gap-px", type=int, default=8, help="字与字之间间距（px）")
     parser.add_argument("--line-gap-px", type=int, default=46, help="两行之间的垂直间距（px）")
@@ -992,6 +1030,10 @@ def main() -> None:
 
         prefix = f"c{i}_"
         svg_text = namespace_svg(svg_text, prefix=prefix)
+        if args.stroke_linejoin != "none":
+            svg_text = apply_stroke_linejoin_to_animation_paths(
+                svg_text, args.stroke_linejoin
+            )
 
         if args.sequence_mode == "fixed-delay":
             offset = args.start_delay + i * args.gap_delay
