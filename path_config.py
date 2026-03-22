@@ -11,7 +11,7 @@ BASE_DIR = r"E:\剪辑工作流"
 # generate_story_from_txt 默认输出根目录 = BASE_DIR / 下列子目录
 STORY_OUTPUT_SUBDIR = "中间文本"
 
-# 可选：放在 BASE_DIR 下，内含背景图时 story 生成会以 5:1 权重相对纯色随机抽一张铺画布（cover）
+# 可选：放在 BASE_DIR 下，内含背景图时 story 生成会以 2:1 权重相对纯色随机抽一张铺画布（cover）
 STORY_BG_IMAGES_SUBDIR = "中间文本背景"
 
 # 其下：HTML 等在「{安全文件名}{STORY_DRAFT_SUFFIX}」；MP4 在「{安全文件名}{STORY_FINAL_SUFFIX}」（与草稿同级）。

@@ -4,7 +4,7 @@
 从纯文本文案生成「多页」手写动画，每页两行（跳过空行），每页调用 generate_animated_text.py，
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
 未在「--」后指定 --canvas-bg / --canvas-bg-image 时：若 path_config.BASE_DIR/中间文本背景 存在且含图片，
-  则以 5:1 权重相对「仅纯色」随机选背景图（CSS cover 铺满，小图等比放大）并配随机淡色底；否则仅随机纯色（与 backgrounds.py 一致）。
+  则以 2:1 权重相对「仅纯色」随机选背景图（CSS cover 铺满，小图等比放大）并配随机淡色底；否则仅随机纯色（与 backgrounds.py 一致）。
   指定 --canvas-bg 或 --canvas-bg-image 则全 story 按参数，不再走上述逻辑。
 index.html 页间切换可用 --story-page-transition 配置（默认 text=方式2）：
   · text（方式2，默认）：子页注入 --story-index-bridge + --transparent-canvas-backdrop；index 内 storyStaticBackdrop 与整 story 画布一致，子页背景透明，iframe 换 src 时底图不闪断。
@@ -629,8 +629,8 @@ def generate_one_story(
         story_bg = pick_random_canvas_background()
         bg_dir = _resolve_story_bg_images_dir()
         bg_imgs = _list_story_bg_images(bg_dir) if bg_dir else []
-        # 有图时：背景图权重 5，纯色权重 1
-        pick_image = bool(bg_imgs) and random.randint(1, 6) <= 5
+        # 有图时：背景图权重 2，纯色权重 1
+        pick_image = bool(bg_imgs) and random.randint(1, 3) <= 2
         if pick_image:
             src = random.choice(bg_imgs)
             try:
@@ -647,7 +647,7 @@ def generate_one_story(
                 *effective_extra,
             ]
             print(
-                f"    本套 story 画布：背景图 {story_bg_image_basename}（相对纯色权重 5:1）"
+                f"    本套 story 画布：背景图 {story_bg_image_basename}（相对纯色权重 2:1）"
                 f" + 底色 {story_bg.name} {story_bg.hex}"
             )
         else:
@@ -900,8 +900,8 @@ def main() -> None:
         default=None,
         help="已废弃",
     )
-    parser.add_argument("--mp4-width", default=None, help="传给 export 的 --width")
-    parser.add_argument("--mp4-height", default=None, help="传给 export 的 --height")
+    parser.add_argument("--mp4-width", default=1054, help="传给 export 的 --width")
+    parser.add_argument("--mp4-height", default=588, help="传给 export 的 --height")
     parser.add_argument(
         "--mp4-export-workers",
         type=int,
