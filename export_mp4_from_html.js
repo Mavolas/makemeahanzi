@@ -137,7 +137,7 @@ function printUsage() {
     [
       '用法：',
       '  单页：  node export_mp4_from_html.js --in phrase.html --out out.mp4 [--width 1000] [--height 600] [--duration 5]',
-      '  故事：  node export_mp4_from_html.js --story story_output --out story.mp4 [--hide-bar] [--tail 1] [--story-pad-sec 1]',
+      '  故事：  node export_mp4_from_html.js --story <含index与meta的目录> --out 成片.mp4 [--hide-bar] [--tail 1] [--story-pad-sec 1]',
       '         或将 --in 指向含 index.html + story_meta.json 的目录',
     ].join('\n'),
   );

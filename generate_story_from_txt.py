@@ -5,7 +5,7 @@
 最后生成 index.html 用 iframe 按时间轴连续播放全部页。
 
 不传文案路径时：扫描仓库根下「wenan」目录内全部 .txt，逐个打印摘要（文件名、行数、约多少页、前几行），
-再只问一次「每个文稿统一生成多少套」；每套输出到独立子目录（如 story_output/文件名_01/）。
+再只问一次「每个文稿统一生成多少套」；每套输出到独立子目录（默认 path_config.BASE_DIR/中间文本/文件名_01/）。
 
 用法示例：
   python3 generate_story_from_txt.py
@@ -32,6 +32,18 @@ from pathlib import Path
 from generate_animated_text import estimate_phrase_html_duration_seconds
 
 _WENAN_DIR_NAME = "wenan"
+
+
+def _default_output_root() -> Path:
+    """默认输出：path_config.BASE_DIR / STORY_OUTPUT_SUBDIR；失败则用仓库内 story_output。"""
+    repo_root = Path(__file__).resolve().parent
+    try:
+        from path_config import BASE_DIR, STORY_OUTPUT_SUBDIR
+
+        root = Path(BASE_DIR).expanduser() / STORY_OUTPUT_SUBDIR
+        return root.resolve()
+    except Exception:
+        return (repo_root / "story_output").resolve()
 _FADE_OUT_SECONDS = 1.0
 
 _HOMEBREW_FFMPEG_CANDIDATES = (
@@ -267,8 +279,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-dir",
-        default="story_output",
-        help="输出根目录；单文件时为最终目录；wenan 批量时在旗下建 文件名_01 等子目录",
+        default=None,
+        metavar="DIR",
+        help="输出根目录（省略则用 path_config：BASE_DIR/中间文本；失败则用仓库 story_output）",
     )
     parser.add_argument(
         "--wenan-dir",
@@ -335,7 +348,12 @@ def main() -> None:
         gen_extra = gen_extra[1:]
 
     export_mp4 = not args.no_export_mp4
-    base_out = Path(args.out_dir).expanduser().resolve()
+    base_out = (
+        Path(args.out_dir).expanduser().resolve()
+        if args.out_dir
+        else _default_output_root()
+    )
+    base_out.mkdir(parents=True, exist_ok=True)
 
     if args.txt_path:
         txt_path = Path(args.txt_path).expanduser().resolve()
