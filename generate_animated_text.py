@@ -293,8 +293,10 @@ def scale_stylesheet_stroke_width_to_screen_px(
     """
     MMH 的 stroke-width 写在 @keyframes 里（常见书写 128、收笔 1024）。
     target_peak_user = stroke_width_px * 1024 / char_size，使线宽约等于 stroke_width_px（px）。
+    故生成 HTML 里不会出现字面「28」等，而是约 28*1024/char_size 的用户单位数。
     每个 @keyframes 内映射 stroke-width；默认 stroke_draw_ratio=1 为全程等粗。
     stroke_width_px <= 0 时不修改。
+    视觉上：源 SVG 的 clip-path 会在粗线宽时裁掉笔画外侧，大 px 之间可能几乎无差别（非本函数封顶）。
     """
     if stroke_width_px <= 0 or char_size <= 0:
         return svg_text
@@ -440,10 +442,19 @@ def estimate_phrase_html_duration_seconds(html: str, *, fallback_seconds: float 
     return best if best > 0 else fallback_seconds
 
 
-def svg_to_html(svg_text: str, char_size: int) -> str:
+def svg_to_html(
+    svg_text: str,
+    char_size: int,
+    *,
+    screen_stroke_width_px: Optional[float] = None,
+) -> str:
     # 仅靠 CSS 缩放即可，所以不额外改 svg 标签属性
     # 注意：svg_text 本身已经有 <svg ...>...</svg>
-    return f'<div class="char">{svg_text}</div>'
+    # data-screen-stroke-px：期望的屏幕线宽（px）；style 内数值为 viewBox 用户单位，不会等于该数
+    data = ""
+    if screen_stroke_width_px is not None and screen_stroke_width_px > 0:
+        data = f' data-screen-stroke-px="{screen_stroke_width_px:g}"'
+    return f'<div class="char"{data}>{svg_text}</div>'
 
 
 def inject_hand_image(
@@ -930,9 +941,12 @@ def main() -> None:
     parser.add_argument(
         "--stroke-width-px",
         type=float,
-        default=28.0,
+        default=3.0,
         metavar="PX",
-        help="笔画线宽（约等于屏幕像素），按 viewBox 与 --char-size 换算后写入 SVG 动画；≤0 保留源 SVG 线宽",
+        help="笔画在屏幕上的目标线宽（px）；会换算为 viewBox 用户单位写入 @keyframes（源码里约 此值×1024÷--char-size）；"
+        "≤0 保留源 SVG 线宽。.char 带 data-screen-stroke-px 便于核对。"
+        "注意：MMH 动画 path 常带 clip-path（按字轮廓裁切），线宽大到一定程度后再加宽多在裁切外被切掉，"
+        "故 28 与 48 可能看起来差不多；3～8 等较小值区间变化更明显。程序未设上限，「看不见更粗」是几何/裁切饱和而非封顶。",
     )
     parser.add_argument(
         "--stroke-draw-ratio",
@@ -1217,7 +1231,15 @@ def main() -> None:
                         ]
                     )
 
-        pieces_html.append(svg_to_html(svg_text, char_size=args.char_size))
+        pieces_html.append(
+            svg_to_html(
+                svg_text,
+                char_size=args.char_size,
+                screen_stroke_width_px=args.stroke_width_px
+                if args.stroke_width_px > 0
+                else None,
+            )
+        )
 
     hand_js = ""
     if hand_image_url:
